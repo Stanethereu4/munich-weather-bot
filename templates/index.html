@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Munich Weather Bot Dashboard</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #0f1117; color: #e6e6e6; margin: 0; padding: 24px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #8a8f98; font-size: 13px; margin-bottom: 20px; }
+  .status-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 24px; flex-wrap: wrap; }
+  .badge { padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+  .badge.running { background: #1a3d1a; color: #7ee787; }
+  .badge.stopped { background: #3d1a1a; color: #ff7b72; }
+  button { padding: 8px 16px; border-radius: 6px; border: none; font-weight: 600; cursor: pointer; font-size: 13px; }
+  #startBtn { background: #2ea043; color: white; }
+  #stopBtn { background: #da3633; color: white; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .meta { color: #8a8f98; font-size: 12px; }
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 28px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
+  .card .num { font-size: 22px; font-weight: 700; }
+  .card .label { font-size: 11px; color: #8a8f98; text-transform: uppercase; letter-spacing: 0.03em; }
+  section { margin-bottom: 32px; }
+  h2 { font-size: 14px; color: #8a8f98; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #21262d; white-space: nowrap; }
+  th { color: #8a8f98; font-weight: 600; }
+  .err { background: #3d1a1a; color: #ff7b72; padding: 10px 14px; border-radius: 6px; font-size: 12px; margin-bottom: 16px; white-space: pre-wrap; }
+  .scroll { max-height: 320px; overflow-y: auto; border: 1px solid #21262d; border-radius: 6px; }
+  .buy-yes { color: #7ee787; }
+  .buy-no { color: #ff7b72; }
+</style>
+</head>
+<body>
+
+<h1>Munich Weather Bot</h1>
+<div class="sub">Local dashboard — reads directly from weather_bot.db, no data leaves this machine.</div>
+
+<div class="status-bar">
+  <span id="statusBadge" class="badge stopped">STOPPED</span>
+  <button id="startBtn" onclick="startBot()">Start Logging</button>
+  <button id="stopBtn" onclick="stopBot()" disabled>Stop</button>
+  <span class="meta" id="lastRuns"></span>
+</div>
+
+<div id="errBox"></div>
+
+<div class="summary-grid" id="summaryGrid"></div>
+
+<section>
+  <h2>Recent Predictions</h2>
+  <div class="scroll">
+    <table id="predictionsTable"><thead><tr>
+      <th>Time</th><th>Target</th><th>Bracket</th><th>Model P</th><th>Mkt P</th>
+      <th>Net Edge</th><th>Signal</th><th>Bet $</th><th>Settled</th><th>Brier</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section>
+  <h2>Recent Price Snapshots (15-min log)</h2>
+  <div class="scroll">
+    <table id="pricesTable"><thead><tr>
+      <th>Time</th><th>Event</th><th>Question</th><th>Prob %</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section>
+  <h2>Lead-Time Calibration (measured sigma)</h2>
+  <div class="scroll">
+    <table id="calibrationTable"><thead><tr>
+      <th>Computed</th><th>Horizon (days)</th><th>MAE °C</th><th>Sigma °C</th><th>N days</th><th>ECMWF Wgt</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<script>
+async function fetchJSON(url, opts) {
+  const res = await fetch(url, opts);
+  return res.json();
+}
+
+async function startBot() {
+  await fetchJSON('/api/start', { method: 'POST' });
+  refreshAll();
+}
+async function stopBot() {
+  await fetchJSON('/api/stop', { method: 'POST' });
+  refreshAll();
+}
+
+function fmt(v, digits) {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'number' && digits !== undefined) return v.toFixed(digits);
+  return v;
+}
+
+async function refreshStatus() {
+  const s = await fetchJSON('/api/status');
+  const badge = document.getElementById('statusBadge');
+  badge.textContent = s.running ? 'RUNNING' : 'STOPPED';
+  badge.className = 'badge ' + (s.running ? 'running' : 'stopped');
+  document.getElementById('startBtn').disabled = s.running;
+  document.getElementById('stopBtn').disabled = !s.running;
+  document.getElementById('lastRuns').textContent =
+    `Last price run: ${s.last_price_run || 'never'} (${s.run_count_prices}x) · ` +
+    `Last full run: ${s.last_full_run || 'never'} (${s.run_count_full}x)`;
+
+  const errBox = document.getElementById('errBox');
+  errBox.innerHTML = s.last_error ? `<div class="err">${s.last_error}</div>` : '';
+}
+
+async function refreshSummary() {
+  const s = await fetchJSON('/api/summary');
+  const grid = document.getElementById('summaryGrid');
+  const cards = [
+    ['predictions', 'Predictions logged'],
+    ['predictions_settled', 'Settled'],
+    ['price_snapshots', 'Price snapshots'],
+    ['forecast_snapshots', 'Forecast snapshots'],
+    ['leadtime_calibration', 'Calibration runs'],
+  ];
+  grid.innerHTML = cards.map(([key, label]) =>
+    `<div class="card"><div class="num">${s[key] ?? 0}</div><div class="label">${label}</div></div>`
+  ).join('') + `<div class="card"><div class="num">${fmt(s.avg_brier_score, 4)}</div><div class="label">Avg Brier Score</div></div>`;
+}
+
+async function refreshPredictions() {
+  const rows = await fetchJSON('/api/predictions');
+  const tbody = document.querySelector('#predictionsTable tbody');
+  tbody.innerHTML = rows.map(r => {
+    const sigClass = r.signal === 'BUY YES' ? 'buy-yes' : (r.signal === 'BUY NO' ? 'buy-no' : '');
+    return `<tr>
+      <td>${(r.timestamp || '').slice(0,16)}</td>
+      <td>${r.target_date}</td>
+      <td>${r.bracket_label}</td>
+      <td>${fmt(r.model_prob*100,1)}%</td>
+      <td>${fmt(r.market_price*100,1)}%</td>
+      <td>${fmt(r.net_edge*100,1)}%</td>
+      <td class="${sigClass}">${r.signal}</td>
+      <td>$${fmt(r.bet_amount,2)}</td>
+      <td>${r.settled ? 'yes' : 'no'}</td>
+      <td>${fmt(r.brier_score,4)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refreshPrices() {
+  const rows = await fetchJSON('/api/prices');
+  const tbody = document.querySelector('#pricesTable tbody');
+  tbody.innerHTML = rows.map(r => `<tr>
+    <td>${(r.timestamp || '').slice(0,16)}</td>
+    <td>${r.event_slug}</td>
+    <td>${r.market_question}</td>
+    <td>${fmt(r.polymarket_prob,1)}</td>
+  </tr>`).join('');
+}
+
+async function refreshCalibration() {
+  const rows = await fetchJSON('/api/calibration');
+  const tbody = document.querySelector('#calibrationTable tbody');
+  tbody.innerHTML = rows.map(r => `<tr>
+    <td>${(r.computed_at || '').slice(0,16)}</td>
+    <td>${r.horizon_days}</td>
+    <td>${fmt(r.mae_c,3)}</td>
+    <td>${fmt(r.sigma_c,3)}</td>
+    <td>${r.n_days_evaluated}</td>
+    <td>${r.ecmwf_weight !== null ? fmt(r.ecmwf_weight*100,1)+'%' : 'N/A'}</td>
+  </tr>`).join('');
+}
+
+async function refreshAll() {
+  await Promise.all([refreshStatus(), refreshSummary(), refreshPredictions(), refreshPrices(), refreshCalibration()]);
+}
+
+refreshAll();
+setInterval(refreshAll, 10000); // poll every 10s
+</script>
+
+</body>
+</html>
