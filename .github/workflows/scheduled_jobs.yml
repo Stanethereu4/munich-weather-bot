@@ -1,0 +1,40 @@
+name: Munich Weather Bot - Scheduled Logging
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+    - cron: "0 */4 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  prices-only:
+    if: github.event.schedule == '*/15 * * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run price snapshot
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 munich_bot.py --prices-only
+
+  full-run:
+    if: github.event.schedule == '0 */4 * * *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run full model scan + settlement
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 munich_bot.py
