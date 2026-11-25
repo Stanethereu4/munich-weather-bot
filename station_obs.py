@@ -3,6 +3,10 @@ station_obs.py
 --------------
 Ground truth = what Polymarket actually resolves on.
 
+Works for both market kinds: kind="high" -> daily max ("Highest
+temperature" markets), kind="low" -> daily min ("Lowest temperature"
+markets). The rules below are identical for both, with min in place of max.
+
 Polymarket's rules (read from the live market description, 25 Nov 2026):
   - source: ROUTINE METAR reports for Munich Airport (EDDM) published by
     aviationweather.gov (NOAA AWC). SPECI (special) reports do NOT count.
@@ -52,15 +56,22 @@ def _round_half_up(x):
 MIN_REPORTS_PER_DAY = 40
 
 
-def _daily_max(df):
+def _daily_extreme(df, kind="high"):
     """df: columns local_dt (tz-aware, Europe/Berlin), temp_c (float).
-    Returns {YYYY-MM-DD: whole-degree max} per complete local day."""
+    Returns {YYYY-MM-DD: whole-degree max (high) or min (low)} per complete
+    local day. Rounding comes after taking the extreme; same result as
+    rounding each report first, since rounding never changes the order."""
     df = df.dropna(subset=["local_dt", "temp_c"])
     if df.empty:
         return {}
     df = df.assign(date=df["local_dt"].dt.strftime("%Y-%m-%d"))
-    return {d: _round_half_up(g["temp_c"].max())
+    pick = (lambda g: g["temp_c"].max()) if kind == "high" else (lambda g: g["temp_c"].min())
+    return {d: _round_half_up(pick(g))
             for d, g in df.groupby("date") if len(g) >= MIN_REPORTS_PER_DAY}
+
+
+def _daily_max(df):
+    return _daily_extreme(df, "high")
 
 
 def fetch_iem(start: date, end: date):
@@ -114,9 +125,19 @@ def fetch_awc_day(day: date):
 
 
 def fetch_daily_max(start, end, verbose=False):
-    """{YYYY-MM-DD: whole-degree station max} for start..end (dates or
-    'YYYY-MM-DD' strings). Days with no data at all are left out, so
-    callers can tell 'unknown' from a real value."""
+    """Daily max (Highest-temperature markets). See fetch_daily_extreme."""
+    return fetch_daily_extreme(start, end, "high", verbose)
+
+
+def fetch_daily_min(start, end, verbose=False):
+    """Daily min (Lowest-temperature markets). See fetch_daily_extreme."""
+    return fetch_daily_extreme(start, end, "low", verbose)
+
+
+def fetch_daily_extreme(start, end, kind="high", verbose=False):
+    """{YYYY-MM-DD: whole-degree station max (kind='high') or min ('low')}
+    for start..end (dates or 'YYYY-MM-DD' strings). Days with no data at
+    all are left out, so callers can tell 'unknown' from a real value."""
     if isinstance(start, str):
         start = date.fromisoformat(start)
     if isinstance(end, str):
@@ -128,7 +149,7 @@ def fetch_daily_max(start, end, verbose=False):
     d = max(start, awc_horizon)
     while d <= end:
         try:
-            result.update(_daily_max(fetch_awc_day(d)))
+            result.update(_daily_extreme(fetch_awc_day(d), kind))
         except Exception as e:
             print(f"[station] AWC fetch failed for {d}: {e}")
         d += timedelta(days=1)
@@ -138,7 +159,7 @@ def fetch_daily_max(start, end, verbose=False):
                if (start + timedelta(days=i)).strftime("%Y-%m-%d") not in result]
     if missing:
         try:
-            iem = _daily_max(fetch_iem(min(missing), max(missing)))
+            iem = _daily_extreme(fetch_iem(min(missing), max(missing)), kind)
             for m in missing:
                 k = m.strftime("%Y-%m-%d")
                 if k in iem:
@@ -148,22 +169,28 @@ def fetch_daily_max(start, end, verbose=False):
 
     if verbose:
         missing = (end - start).days + 1 - len(result)
-        print(f"[station] {STATION} daily max: {len(result)} day(s) found, {missing} missing")
+        print(f"[station] {STATION} daily {'max' if kind == 'high' else 'min'}: "
+              f"{len(result)} day(s) found, {missing} missing")
     return result
 
 
-def observed_running_max(day: date):
+def observed_running_extreme(day: date, kind="high"):
     """
-    For a day that is still in progress: the qualifying max so far
-    (routine METARs only, local date, rounded half up), from AWC.
-    Returns (max_whole_degrees, n_reports, last_report_local_time) or
-    None if nothing has been reported yet. No completeness check here --
+    For a day that is still in progress: the qualifying max (kind='high')
+    or min ('low') so far (routine METARs only, local date, rounded half
+    up), from AWC. Returns (whole_degrees, n_reports, last_report_local_time)
+    or None if nothing has been reported yet. No completeness check here --
     the day isn't over, that's the point.
     """
     df = fetch_awc_day(day).dropna(subset=["temp_c"])
     if df.empty:
         return None
-    return _round_half_up(df["temp_c"].max()), len(df), df["local_dt"].max()
+    v = df["temp_c"].max() if kind == "high" else df["temp_c"].min()
+    return _round_half_up(v), len(df), df["local_dt"].max()
+
+
+def observed_running_max(day: date):
+    return observed_running_extreme(day, "high")
 
 
 def _compare_sources(days=7):

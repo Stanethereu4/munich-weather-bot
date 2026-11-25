@@ -1,7 +1,11 @@
 """
 daymax.py
 ---------
-One shared definition of "the daily maximum" for model data.
+One shared definition of "the daily maximum" (and minimum) for model data.
+
+Market kinds: "high" = "Highest temperature in Munich on <date>?" (daily
+max), "low" = "Lowest temperature in Munich on <date>?" (daily min). Both
+use the same window: the whole local day.
 
 Polymarket's Munich markets resolve on the highest temperature over the
 WHOLE local calendar day (00:00-23:59 Europe/Berlin), and station_obs.py
@@ -30,17 +34,35 @@ def hourly_times_local(hourly, n_values):
     return ts_utc.tz_convert(LOCAL_TZ)
 
 
-def daily_max_by_date(ts_local, values):
-    """{'YYYY-MM-DD': max over the full local day} for an hourly series.
-    Days with too few valid hours map to NaN (see MIN_VALID_HOURS)."""
+KINDS = ("high", "low")
+
+
+def daily_extreme_by_date(ts_local, values, kind="high"):
+    """{'YYYY-MM-DD': max (kind='high') or min (kind='low') over the full
+    local day} for an hourly series. Days with too few valid hours map to
+    NaN (see MIN_VALID_HOURS)."""
+    if kind not in KINDS:
+        raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
     df = pd.DataFrame({"date": pd.DatetimeIndex(ts_local).strftime("%Y-%m-%d"),
                        "temp": values}).dropna(subset=["temp"])
     out = {}
     for d, grp in df.groupby("date"):
-        out[d] = float(grp["temp"].max()) if len(grp) >= MIN_VALID_HOURS else float("nan")
+        if len(grp) < MIN_VALID_HOURS:
+            out[d] = float("nan")
+        else:
+            out[d] = float(grp["temp"].max() if kind == "high" else grp["temp"].min())
     return out
 
 
+def daily_extreme_for(target_date_str, ts_local, values, kind="high"):
+    """Full-day max/min for one specific date (NaN if missing or incomplete)."""
+    return daily_extreme_by_date(ts_local, values, kind).get(target_date_str, float("nan"))
+
+
+# Old names, kept so existing callers keep working.
+def daily_max_by_date(ts_local, values):
+    return daily_extreme_by_date(ts_local, values, "high")
+
+
 def daily_max_for(target_date_str, ts_local, values):
-    """Full-day max for one specific date (NaN if missing or incomplete)."""
-    return daily_max_by_date(ts_local, values).get(target_date_str, float("nan"))
+    return daily_extreme_for(target_date_str, ts_local, values, "high")
