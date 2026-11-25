@@ -263,6 +263,7 @@ NEW_COLUMNS = [
     ("predictions", "pm_outcome", "INTEGER"),         # 1 if this bracket won on Polymarket
     ("predictions", "pm_winning_bracket", "TEXT"),
     ("predictions", "outcome_mismatch", "INTEGER"),   # 1 if station outcome != Polymarket outcome
+    ("predictions", "fee_rate", "REAL"),              # taker fee rate used (market's feeSchedule)
 ]
 
 

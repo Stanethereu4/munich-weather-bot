@@ -23,12 +23,15 @@ LONGITUDE = 11.7860
 ROLLING_WINDOW_DAYS = 30
 MIN_EDGE_THRESHOLD = 0.03   # 3% minimum net probability edge after fees
 
-# POLYMARKET TAKER FEE PARAMETER
-# Formula: Fee = shares * THETA * p * (1 - p)
-# Category: Economics / Culture / Weather / Other -> THETA = 0.05 (Max 1.25% at p=0.50)
-# Re-verify against https://help.polymarket.com/en/articles/13364478-trading-fees
-# periodically -- this schedule has changed more than once this year.
-POLYMARKET_THETA = 0.05
+# POLYMARKET TAKER FEE
+# Formula (docs.polymarket.com/trading/fees, checked 25 Nov 2026):
+#     fee = shares * feeRate * (p * (1 - p)) ** exponent      (exponent is 1 today)
+# Only takers pay; makers pay 0. Weather's rate dropped from 0.05 to 0.01 on
+# 20 Nov 2026 -- Polymarket says not to hardcode it, so the bot reads each
+# market's own `feeSchedule` from Gamma (rate, exponent). This value is only
+# the fallback if a market doesn't publish one.
+DEFAULT_FEE_RATE = 0.01
+DEFAULT_FEE_EXPONENT = 1.0
 
 # CAPITAL & RISK PARAMETERS
 BANKROLL = 1000.0
@@ -104,12 +107,14 @@ def calculate_bracket_probability(mean_temp, sigma, bounds):
         return norm.cdf((t_max - mean_temp) / sigma) - norm.cdf((t_min - mean_temp) / sigma)
 
 
-def taker_fee_per_share(price, theta=POLYMARKET_THETA):
-    """Fee per share when buying at `price` (formula in the config above)."""
-    return theta * price * (1.0 - price)
+def taker_fee_per_share(price, fee_rate=DEFAULT_FEE_RATE, exponent=DEFAULT_FEE_EXPONENT):
+    """Fee per share when buying at `price` as a taker (formula above).
+    Example: 0.01 * (0.5 * 0.5) = 0.0025, i.e. 0.25 cents per share at 50c."""
+    return fee_rate * (price * (1.0 - price)) ** exponent
 
 
-def decide_side_and_edge(model_prob, best_bid, best_ask, theta=0.05):
+def decide_side_and_edge(model_prob, best_bid, best_ask,
+                         fee_rate=DEFAULT_FEE_RATE, exponent=DEFAULT_FEE_EXPONENT):
     """
     Decides YES / NO / no trade for one bracket using prices we could
     ACTUALLY trade at, not the midpoint:
@@ -118,9 +123,9 @@ def decide_side_and_edge(model_prob, best_bid, best_ask, theta=0.05):
         markets the NO book is an exact mirror of the YES book (checked
         live 25 Nov 2026: NO ask 0.45 = 1 - YES bid 0.55), so this equals
         the NO token's own best ask.
-    Worked example: model says 40%, book is bid 0.30 / ask 0.34.
-      YES: cost 0.34 + fee 0.05*0.34*0.66 = 0.3512 -> edge 0.40-0.3512 = +4.9%
-      NO:  cost 0.70 + fee 0.05*0.70*0.30 = 0.7105 -> edge 0.60-0.7105 = -11.1%
+    Worked example: model says 40%, book is bid 0.30 / ask 0.34, fee rate 0.01.
+      YES: cost 0.34 + fee 0.01*0.34*0.66 = 0.3422 -> edge 0.40-0.3422 = +5.8%
+      NO:  cost 0.70 + fee 0.01*0.70*0.30 = 0.7021 -> edge 0.60-0.7021 = -10.2%
       -> BUY YES (edge above the 3% threshold).
     Returns (signal, net_edge, side, cost_per_share). Sizing happens
     jointly across the event in kelly_multi.solve_joint_kelly.
@@ -129,11 +134,11 @@ def decide_side_and_edge(model_prob, best_bid, best_ask, theta=0.05):
     cost_yes = cost_no = None
 
     if best_ask is not None and 0.0 < best_ask < 1.0:
-        cost_yes = best_ask + taker_fee_per_share(best_ask, theta)
+        cost_yes = best_ask + taker_fee_per_share(best_ask, fee_rate, exponent)
         net_edge_yes = model_prob - cost_yes
     if best_bid is not None and 0.0 < best_bid < 1.0:
         price_no = 1.0 - best_bid
-        cost_no = price_no + taker_fee_per_share(price_no, theta)
+        cost_no = price_no + taker_fee_per_share(price_no, fee_rate, exponent)
         net_edge_no = (1.0 - model_prob) - cost_no
 
     if cost_yes is None and cost_no is None:
@@ -405,8 +410,15 @@ def discover_open_munich_events():
                 prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
                 if len(prices) > 0:
                     price = float(prices[0])
+            # Fee parameters published on the market itself (checked live:
+            # feeSchedule = {"rate": 0.01, "exponent": 1, "takerOnly": true, ...}).
+            fs = m.get("feeSchedule") or {}
+            fees_on = m.get("feesEnabled", True)
+            fee_rate = float(fs.get("rate", DEFAULT_FEE_RATE)) if fees_on else 0.0
+            fee_exp = float(fs.get("exponent", DEFAULT_FEE_EXPONENT))
             brackets[label] = {"token_id": token_id, "no_token_id": no_token_id,
-                               "question": question, "price": price}
+                               "question": question, "price": price,
+                               "fee_rate": fee_rate, "fee_exponent": fee_exp}
 
         if brackets:
             results.append({
@@ -573,14 +585,14 @@ def log_predictions(target_date_str, event_slug, questions_by_label, rows,
                 target_date, event_slug, market_question, bracket_label,
                 model_prob, market_price, net_edge, signal, kelly_fraction,
                 bet_amount, calibrated_mean_temp, sigma_used, lead_time_hours,
-                token_id, snapshot_id, ts_utc, best_bid, best_ask, entry_cost
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                token_id, snapshot_id, ts_utc, best_bid, best_ask, entry_cost, fee_rate
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             target_date_str, event_slug, questions_by_label.get(r["label"], r["label"]), r["label"],
             r["model_prob"], r["market_price"], r["net_edge"], r["signal"], r["kelly_fraction"],
             r["bet_amount"], calibrated_mean, sigma, lead_time_hours,
             tokens_by_label.get(r["label"]), snapshot_id, ts,
-            r.get("best_bid"), r.get("best_ask"), r.get("entry_cost"),
+            r.get("best_bid"), r.get("best_ask"), r.get("entry_cost"), r.get("fee_rate"),
         ))
     conn.commit()
     conn.close()
@@ -785,7 +797,7 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
     print(f" PHASE 5: POLYMARKET EDGE & KELLY POSITION SCANNER | TARGET DATE: {target_date_str}")
     print("=" * 105)
     print(f"[*] Trading Parameters: Capital = ${BANKROLL:,.2f} | Risk = Quarter-Kelly ({KELLY_FRACTION:.2f}x) "
-          f"| Taker Fee Theta = {POLYMARKET_THETA:.2f}")
+          f"| Taker fee: per-market feeSchedule (fallback rate {DEFAULT_FEE_RATE})")
 
     print(f"[*] Calibrating weights over prior {ROLLING_WINDOW_DAYS} days...")
     X_tr, y_tr = fetch_calibration_data(target_date_str)
@@ -828,6 +840,8 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
                           if b["price"] is not None}
         questions_by_label = {label: b["question"] for label, b in pre_discovered_event["brackets"].items()}
         tokens_by_label = {label: b["token_id"] for label, b in pre_discovered_event["brackets"].items()}
+        fees_by_label = {label: (b["fee_rate"], b["fee_exponent"])
+                         for label, b in pre_discovered_event["brackets"].items()}
         error_msg = None if market_prices else "No priced brackets in pre-discovered event."
     else:
         # Fallback path if called directly without discovery (e.g. manual testing).
@@ -843,6 +857,7 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
             market_prices = {label: b["price"] for label, b in event["brackets"].items() if b["price"] is not None}
             questions_by_label = {label: b["question"] for label, b in event["brackets"].items()}
             tokens_by_label = {label: b["token_id"] for label, b in event["brackets"].items()}
+            fees_by_label = {label: (b["fee_rate"], b["fee_exponent"]) for label, b in event["brackets"].items()}
             error_msg = None if market_prices else "No priced brackets found."
 
     if not market_prices:
@@ -881,14 +896,16 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
         if tob.get("best_bid") is None and tob.get("best_ask") is None:
             print(f" {label:<18} | no order book -- skipped")
             continue
+        fee_rate, fee_exp = fees_by_label.get(label, (DEFAULT_FEE_RATE, DEFAULT_FEE_EXPONENT))
         signal, net_edge, side, cost = decide_side_and_edge(
-            mod_p, tob.get("best_bid"), tob.get("best_ask"), POLYMARKET_THETA)
+            mod_p, tob.get("best_bid"), tob.get("best_ask"), fee_rate, fee_exp)
         # Midpoint only exists if BOTH sides have orders. With one side empty
         # Gamma still shows a "price" (e.g. half of a lone 0.13 ask = 0.065),
         # which is not a real market probability -- log None instead.
         decisions[label] = {"model_prob": mod_p, "market_price": tob.get("mid"),
                              "best_bid": tob.get("best_bid"), "best_ask": tob.get("best_ask"),
-                             "signal": signal, "net_edge": net_edge, "side": side, "cost": cost}
+                             "signal": signal, "net_edge": net_edge, "side": side, "cost": cost,
+                             "fee_rate": fee_rate}
 
     # PASS 2: joint sizing across every tradeable bracket in this event,
     # sharing ONE bankroll constraint instead of each bracket getting
@@ -916,7 +933,7 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
             "label": label, "model_prob": d["model_prob"], "market_price": d["market_price"],
             "net_edge": d["net_edge"], "signal": d["signal"], "kelly_fraction": kelly_frac,
             "bet_amount": bet_amount, "best_bid": d["best_bid"], "best_ask": d["best_ask"],
-            "entry_cost": d["cost"],
+            "entry_cost": d["cost"], "fee_rate": d["fee_rate"],
         })
     print("=" * 105)
     total_staked = sum(r["bet_amount"] for r in log_rows)
