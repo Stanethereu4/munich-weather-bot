@@ -587,11 +587,42 @@ def log_predictions(target_date_str, event_slug, questions_by_label, rows,
     print(f"[DB] Logged {len(rows)} prediction rows for {target_date_str}")
 
 
+def _is_valid_whole_degree(value):
+    """True only for a real whole-number temperature (not None / NaN / float junk)."""
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, (int, np.integer)):
+        return True
+    return isinstance(value, float) and not np.isnan(value) and value.is_integer()
+
+
+def _bracket_outcome(label, actual_temp):
+    """1 if the whole-degree actual_temp falls in this bracket, else 0."""
+    t_min, t_max = parse_label_to_bounds(label)
+    if t_min is None:
+        return 1 if actual_temp <= t_max else 0
+    if t_max is None:
+        return 1 if actual_temp >= t_min else 0
+    return 1 if t_min <= actual_temp <= t_max else 0
+
+
 def settle_unsettled_markets():
-    """Ported over from the earlier version -- was missing from the
-    Phase 5 scanner entirely, which meant nothing was ever settled or
-    Brier-scored. This is the actual mechanism that answers 'is there
-    an edge', so it can't be optional."""
+    """
+    Settles every past target date in two independent ways:
+      1. Station outcome (for calibration / Brier): EDDM routine-METAR max,
+         exactly per Polymarket's rules (station_obs.py). A date is only
+         settled if a valid whole-degree max exists (A3: never settle on
+         a missing or NaN observation).
+      2. Polymarket outcome (for P&L): the winning bracket as Polymarket
+         actually resolved it (A4), read from Gamma once resolved.
+    Then flags any disagreement between the two and audits old rows.
+    """
+    settle_from_station()
+    settle_from_polymarket()
+    audit_settlement()
+
+
+def settle_from_station():
     conn = get_connection()
     cur = conn.cursor()
     today_str = berlin_today().strftime("%Y-%m-%d")   # only settle Munich days that are over
@@ -599,55 +630,125 @@ def settle_unsettled_markets():
         SELECT DISTINCT target_date FROM predictions
         WHERE settled = 0 AND target_date < ?
     """, (today_str,))
-    unsettled_dates = cur.fetchall()
-    if not unsettled_dates:
-        print("[DB] No past unsettled predictions found.")
+    dates = sorted(d for (d,) in cur.fetchall())
+    if not dates:
+        print("[Settlement] No past unsettled predictions found.")
         conn.close()
         return
 
-    dates = sorted(d for (d,) in unsettled_dates)
-    # Ground truth = EDDM METAR daily max, whole °C, local day -- the
-    # same thing Polymarket resolves on (Wunderground Daily
-    # Observations). NOT the Open-Meteo grid, which can be ~1°C off.
     station_max = fetch_station_daily_max(dates[0], dates[-1], verbose=True)
 
     for t_date in dates:
-        if t_date not in station_max:
-            print(f"[Settlement] No EDDM observations yet for {t_date} -- leaving unsettled")
+        actual_temp = station_max.get(t_date)
+        if not _is_valid_whole_degree(actual_temp):
+            print(f"[Settlement] No valid EDDM max for {t_date} (got {actual_temp!r}) -- leaving unsettled")
             continue
-        try:
-            actual_temp = station_max[t_date]
-            print(f"[Settlement] EDDM observed max on {t_date}: {actual_temp}°C")
+        actual_temp = int(actual_temp)
+        print(f"[Settlement] EDDM routine-METAR max on {t_date}: {actual_temp}°C")
 
+        cur.execute("""
+            SELECT id, bracket_label, model_prob FROM predictions
+            WHERE target_date = ? AND settled = 0
+        """, (t_date,))
+        for row_id, label, model_prob in cur.fetchall():
+            outcome = _bracket_outcome(label, actual_temp)
+            brier = (model_prob - outcome) ** 2
             cur.execute("""
-                SELECT id, bracket_label, model_prob FROM predictions
-                WHERE target_date = ? AND settled = 0
-            """, (t_date,))
-            rows = cur.fetchall()
-
-            for row_id, label, model_prob in rows:
-                bounds = parse_label_to_bounds(label)
-                t_min, t_max = bounds
-                if t_min is None:
-                    outcome = 1 if actual_temp <= t_max else 0
-                elif t_max is None:
-                    outcome = 1 if actual_temp >= t_min else 0
-                else:
-                    outcome = 1 if t_min <= actual_temp <= t_max else 0
-
-                brier = (model_prob - outcome) ** 2
-                cur.execute("""
-                    UPDATE predictions
-                    SET actual_max_temp = ?, resolved_outcome = ?, brier_score = ?, settled = 1
-                    WHERE id = ?
-                """, (actual_temp, outcome, round(brier, 4), row_id))
-
-            conn.commit()
-            print(f"[Settlement] Settled all rows for {t_date}")
-        except Exception as e:
-            print(f"[Settlement Error] Could not settle {t_date}: {e}")
-
+                UPDATE predictions
+                SET actual_max_temp = ?, resolved_outcome = ?, brier_score = ?, settled = 1
+                WHERE id = ?
+            """, (actual_temp, outcome, round(brier, 4), row_id))
+        conn.commit()
+        print(f"[Settlement] Settled all rows for {t_date}")
     conn.close()
+
+
+def fetch_polymarket_resolution(event_slug):
+    """
+    Returns the winning bracket label as Polymarket resolved it, or None
+    if the event isn't fully resolved yet. Gamma shape (checked live):
+    each bracket market has outcomes '["Yes","No"]' and, once resolved,
+    outcomePrices '["1","0"]' for the winner and '["0","1"]' for the rest,
+    plus closed=true and umaResolutionStatus='resolved'.
+    """
+    r = requests.get("https://gamma-api.polymarket.com/events",
+                     params={"slug": event_slug}, timeout=15)
+    r.raise_for_status()
+    events = r.json()
+    if not events:
+        return None
+    markets = events[0].get("markets", [])
+    if not markets or not all(m.get("closed") for m in markets):
+        return None
+    winners = []
+    for m in markets:
+        prices = m.get("outcomePrices")
+        prices = json.loads(prices) if isinstance(prices, str) else (prices or [])
+        if prices and str(prices[0]) == "1":
+            winners.append(m.get("groupItemTitle") or m.get("question"))
+    if len(winners) != 1:
+        print(f"[PM-settle] {event_slug}: expected 1 winner, found {winners} -- skipping")
+        return None
+    return winners[0]
+
+
+def settle_from_polymarket():
+    conn = get_connection()
+    cur = conn.cursor()
+    today_str = berlin_today().strftime("%Y-%m-%d")
+    cur.execute("""
+        SELECT DISTINCT event_slug FROM predictions
+        WHERE pm_outcome IS NULL AND target_date < ? AND event_slug IS NOT NULL
+    """, (today_str,))
+    slugs = [s for (s,) in cur.fetchall()]
+    for slug in slugs:
+        try:
+            winner = fetch_polymarket_resolution(slug)
+        except Exception as e:
+            print(f"[PM-settle] {slug}: Gamma fetch failed: {e}")
+            continue
+        if winner is None:
+            print(f"[PM-settle] {slug}: not resolved yet")
+            continue
+        cur.execute("""
+            UPDATE predictions
+            SET pm_outcome = CASE WHEN bracket_label = ? THEN 1 ELSE 0 END,
+                pm_winning_bracket = ?
+            WHERE event_slug = ? AND pm_outcome IS NULL
+        """, (winner, winner, slug))
+        conn.commit()
+        print(f"[PM-settle] {slug}: Polymarket winner = {winner}")
+
+    # Flag rows where the station-derived outcome disagrees with Polymarket.
+    cur.execute("""
+        UPDATE predictions
+        SET outcome_mismatch = CASE WHEN resolved_outcome = pm_outcome THEN 0 ELSE 1 END
+        WHERE settled = 1 AND pm_outcome IS NOT NULL AND outcome_mismatch IS NULL
+    """)
+    conn.commit()
+    cur.execute("""
+        SELECT DISTINCT target_date, actual_max_temp, pm_winning_bracket FROM predictions
+        WHERE outcome_mismatch = 1
+    """)
+    for t_date, actual, winner in cur.fetchall():
+        print(f"[PM-settle] MISMATCH {t_date}: station max {actual}°C but Polymarket winner '{winner}'")
+    conn.close()
+
+
+def audit_settlement():
+    """A3: report already-settled rows that have no valid observation."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT target_date, actual_max_temp FROM predictions WHERE settled = 1")
+    bad = {}
+    for t_date, actual in cur.fetchall():
+        if actual is None or (isinstance(actual, float) and np.isnan(actual)):
+            bad[t_date] = bad.get(t_date, 0) + 1
+    conn.close()
+    if bad:
+        print(f"[audit] WARNING: {sum(bad.values())} settled row(s) with missing/NaN actual_max_temp: {bad}")
+    else:
+        print("[audit] OK: no settled rows with a missing/NaN observation.")
 
 
 def run_scanner_for_all_open_events():

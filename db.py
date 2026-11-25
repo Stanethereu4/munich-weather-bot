@@ -258,6 +258,11 @@ NEW_COLUMNS = [
     ("predictions", "best_bid", "REAL"),
     ("predictions", "best_ask", "REAL"),
     ("predictions", "entry_cost", "REAL"),   # price + fee actually paid for the chosen side
+    # A4 -- Polymarket's own resolution (exact truth for P&L), stored next
+    # to the station-derived outcome (resolved_outcome, used for calibration).
+    ("predictions", "pm_outcome", "INTEGER"),         # 1 if this bracket won on Polymarket
+    ("predictions", "pm_winning_bracket", "TEXT"),
+    ("predictions", "outcome_mismatch", "INTEGER"),   # 1 if station outcome != Polymarket outcome
 ]
 
 
