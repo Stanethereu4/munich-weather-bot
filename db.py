@@ -162,7 +162,7 @@ def init_db():
             timestamp {ts_default},
             event_slug TEXT,
             market_question TEXT,
-            polymarket_prob REAL
+            polymarket_prob REAL      -- LEGACY: price x 100, no longer written (see gamma_price)
         )
     """)
 
@@ -214,9 +214,46 @@ def init_db():
         )
     """)
 
+    _apply_migrations(cur, is_postgres)
+
     conn.commit()
     conn.close()
     print(f"[db] Initialized in {'POSTGRES (remote)' if is_postgres else 'SQLITE (local file)'} mode.")
+
+
+# ---------------------------------------------------------------------
+# Schema migrations
+# ---------------------------------------------------------------------
+# CREATE TABLE IF NOT EXISTS never changes a table that already exists,
+# so columns added later are listed here and added on startup if
+# missing. Safe to run every time (it only adds what isn't there yet).
+NEW_COLUMNS = [
+    # A7 -- market price stored as a probability 0-1 (the old
+    # price_snapshots.polymarket_prob column is price x 100; kept for
+    # old rows, no longer written).
+    ("price_snapshots", "gamma_price", "REAL"),
+]
+
+
+def _existing_columns(cur, table, is_postgres):
+    if is_postgres:
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = ?", (table,))
+        return {r[0] for r in cur.fetchall()}
+    cur.execute(f"PRAGMA table_info({table})")
+    return {r[1] for r in cur.fetchall()}
+
+
+def _apply_migrations(cur, is_postgres):
+    for table, column, col_type in NEW_COLUMNS:
+        if column not in _existing_columns(cur, table, is_postgres):
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            print(f"[db] migration: added {table}.{column}")
+
+    # A7 backfill: convert old x100 prices into the 0-1 column, once.
+    cur.execute("""
+        UPDATE price_snapshots SET gamma_price = polymarket_prob / 100.0
+        WHERE gamma_price IS NULL AND polymarket_prob IS NOT NULL
+    """)
 
 
 def latest_leadtime_sigma(lead_time_hours: float) -> float:

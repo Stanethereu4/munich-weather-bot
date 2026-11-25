@@ -463,9 +463,9 @@ def log_price_snapshot(event_slug, market_prices, questions_by_label):
     cur = conn.cursor()
     for label, price in market_prices.items():
         cur.execute("""
-            INSERT INTO price_snapshots (event_slug, market_question, polymarket_prob)
+            INSERT INTO price_snapshots (event_slug, market_question, gamma_price)
             VALUES (?, ?, ?)
-        """, (event_slug, questions_by_label.get(label, label), price * 100.0))
+        """, (event_slug, questions_by_label.get(label, label), price))   # 0-1, like predictions.market_price
     conn.commit()
     conn.close()
     print(f"[prices-only] logged {len(market_prices)} rows for {event_slug} "
