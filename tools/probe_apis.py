@@ -80,6 +80,27 @@ if "station" in probes:
         lines = r.text.strip().splitlines()
         print(f"report_type={rt}: {len(lines)-1} rows | header: {lines[0]} | first: {lines[1] if len(lines)>1 else None}")
 
+if "gamma-lowest" in probes:
+    # Do "lowest temperature" markets exist for Munich? Try a few slug
+    # patterns for recent and upcoming dates, then print rules + brackets.
+    section("GAMMA lowest-temperature markets for Munich")
+    found = None
+    for d in [today + timedelta(days=k) for k in (1, 0, -1, -3, -10)]:
+        for pat in ("lowest-temperature-in-munich-on-{m}-{d}-{y}", "minimum-temperature-in-munich-on-{m}-{d}-{y}"):
+            slug = pat.format(m=d.strftime('%B').lower(), d=d.day, y=d.year)
+            r = requests.get(f"{GAMMA}/events", params={"slug": slug}, headers=H, timeout=20).json()
+            print(f"{slug}: {'FOUND' if r else '-'}")
+            if r and found is None:
+                found = r[0]
+    # also look at the series for Munich (the max markets are series 'munich-daily-weather')
+    r = requests.get(f"{GAMMA}/series", params={"slug": "munich-daily-weather"}, headers=H, timeout=20)
+    print("series munich-daily-weather:", r.status_code, r.text[:300])
+    if found:
+        print("\nTITLE:", found.get("title"), "| series:", [x.get("slug") for x in found.get("series", [])])
+        print(found.get("description"))
+        print("brackets:", [m.get("groupItemTitle") for m in found.get("markets", [])])
+        print("volume:", found.get("volume"), "| liquidity:", found.get("liquidity"))
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
