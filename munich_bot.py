@@ -14,6 +14,7 @@ from retry_requests import retry
 from db import init_db, get_connection, latest_leadtime_sigma
 from station_obs import fetch_daily_max as fetch_station_daily_max
 from daymax import hourly_times_local, daily_max_by_date, daily_max_for
+from timeutil import utc_now_iso, berlin_now, berlin_today, hours_until_local_day_start, new_snapshot_id
 from kelly_multi import Candidate, solve_joint_kelly
 
 # --- CONFIGURATION ---
@@ -163,11 +164,12 @@ def log_forecast_snapshot(target_date_str, per_model_max):
     db.py docstring)."""
     conn = get_connection()
     cur = conn.cursor()
+    ts = utc_now_iso()
     for model_key, val in per_model_max.items():
         cur.execute("""
-            INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c)
-            VALUES (?, ?, ?)
-        """, (target_date_str, model_key, val))
+            INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c, ts_utc)
+            VALUES (?, ?, ?, ?)
+        """, (target_date_str, model_key, val, ts))
     conn.commit()
     conn.close()
 
@@ -250,6 +252,7 @@ def fetch_and_log_all_ensemble_members(target_date_str):
     conn = get_connection()
     cur = conn.cursor()
     total_logged = 0
+    ts = utc_now_iso()
 
     for model_key, response in zip(ENSEMBLE_MODELS.keys(), responses):
         hourly = response.Hourly()
@@ -263,9 +266,9 @@ def fetch_and_log_all_ensemble_members(target_date_str):
             if np.isnan(member_max):
                 continue
             cur.execute("""
-                INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c)
-                VALUES (?, ?, ?)
-            """, (target_date_str, f"{model_key}_member{i:02d}", member_max))
+                INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c, ts_utc)
+                VALUES (?, ?, ?, ?)
+            """, (target_date_str, f"{model_key}_member{i:02d}", member_max, ts))
             total_logged += 1
             model_logged += 1
 
@@ -281,7 +284,7 @@ def fetch_and_log_all_ensemble_members(target_date_str):
 
 
 def fetch_calibration_data(target_date_str):
-    now = datetime.now()
+    now = berlin_now().replace(tzinfo=None)   # Munich calendar, naive for date maths below
     safe_end_dt = now - timedelta(days=2)
 
     target_dt = datetime.strptime(target_date_str, "%Y-%m-%d")
@@ -348,7 +351,7 @@ def discover_open_munich_events():
     # today through +3 days (markets open ~2 days ahead, and the
     # previous day's market can still be open in parallel).
     events = []
-    today = datetime.now().date()
+    today = berlin_today()   # markets are named after Munich local dates
     for offset in range(0, 4):
         d = today + timedelta(days=offset)
         slug = f"highest-temperature-in-munich-on-{d.strftime('%B').lower()}-{d.day}-{d.year}"
@@ -381,13 +384,16 @@ def discover_open_munich_events():
             prices_raw = m.get("outcomePrices")
             if not token_ids:
                 continue
-            token_id = json.loads(token_ids)[0] if isinstance(token_ids, str) else token_ids[0]
+            tokens = json.loads(token_ids) if isinstance(token_ids, str) else token_ids
+            token_id = tokens[0]                      # YES token (outcomes are ["Yes", "No"])
+            no_token_id = tokens[1] if len(tokens) > 1 else None
             price = None
             if prices_raw:
                 prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
                 if len(prices) > 0:
                     price = float(prices[0])
-            brackets[label] = {"token_id": token_id, "question": question, "price": price}
+            brackets[label] = {"token_id": token_id, "no_token_id": no_token_id,
+                               "question": question, "price": price}
 
         if brackets:
             results.append({
@@ -438,7 +444,8 @@ def fetch_orderbook_depth(token_id: str):
         return [], []
 
 
-def log_orderbook_depth(event_slug, question, bids, asks):
+def log_orderbook_depth(event_slug, question, bids, asks, token_id=None, bracket_label=None,
+                        snapshot_id=None, ts_utc=None):
     """Logs every visible price level, not just top-of-book. Cadence:
     call this from the 15-min prices-only path -- see db.py docstring,
     this was upgraded from the original 'hourly to start' plan since
@@ -446,30 +453,35 @@ def log_orderbook_depth(event_slug, question, bids, asks):
     no extra API-call cost."""
     conn = get_connection()
     cur = conn.cursor()
-    rows = [(event_slug, question, side, float(level.get("price", 0)), float(level.get("size", 0)))
+    rows = [(event_slug, question, side, float(level.get("price", 0)), float(level.get("size", 0)),
+             token_id, bracket_label, snapshot_id, ts_utc)
             for side, levels in (("bid", bids), ("ask", asks)) for level in levels]
     if rows:
         cur.executemany("""
-            INSERT INTO orderbook_depth (event_slug, market_question, side, price_level, size)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO orderbook_depth (event_slug, market_question, side, price_level, size,
+                                         token_id, bracket_label, snapshot_id, ts_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, rows)
     conn.commit()
     conn.close()
 
 
-def log_price_snapshot(event_slug, market_prices, questions_by_label):
-    """--prices-only path: append-only 15-min price log, no model run."""
+def log_price_snapshot(event_slug, brackets, snapshot_id, ts_utc):
+    """--prices-only path: one row per bracket, all sharing the same
+    snapshot_id and UTC timestamp. Prices are probabilities 0-1."""
     conn = get_connection()
     cur = conn.cursor()
-    for label, price in market_prices.items():
-        cur.execute("""
-            INSERT INTO price_snapshots (event_slug, market_question, gamma_price)
-            VALUES (?, ?, ?)
-        """, (event_slug, questions_by_label.get(label, label), price))   # 0-1, like predictions.market_price
+    rows = [(event_slug, b["question"], label, b["token_id"], b["price"], snapshot_id, ts_utc)
+            for label, b in brackets.items() if b["price"] is not None]
+    if rows:
+        cur.executemany("""
+            INSERT INTO price_snapshots (event_slug, market_question, bracket_label, token_id,
+                                         gamma_price, snapshot_id, ts_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, rows)
     conn.commit()
     conn.close()
-    print(f"[prices-only] logged {len(market_prices)} rows for {event_slug} "
-          f"at {datetime.now().isoformat()}")
+    return len(rows)
 
 
 def run_prices_only_all_open_events():
@@ -487,36 +499,41 @@ def run_prices_only_all_open_events():
         return
 
     for event in events:
-        market_prices = {label: b["price"] for label, b in event["brackets"].items()
-                          if b["price"] is not None}
-        questions_by_label = {label: b["question"] for label, b in event["brackets"].items()}
-        if market_prices:
-            log_price_snapshot(event["event_slug"], market_prices, questions_by_label)
+        # Everything logged for this event in this pass shares one id + time.
+        snapshot_id, ts = new_snapshot_id(), utc_now_iso()
+        n_prices = log_price_snapshot(event["event_slug"], event["brackets"], snapshot_id, ts)
 
         for label, b in event["brackets"].items():
             bids, asks = fetch_orderbook_depth(b["token_id"])
             if bids or asks:
-                log_orderbook_depth(event["event_slug"], b["question"], bids, asks)
+                log_orderbook_depth(event["event_slug"], b["question"], bids, asks,
+                                    token_id=b["token_id"], bracket_label=label,
+                                    snapshot_id=snapshot_id, ts_utc=ts)
 
         print(f"[prices-only] {event['event_slug']} (target_date={event['target_date']}): "
-              f"logged {len(market_prices)} price rows + depth for {len(event['brackets'])} brackets")
+              f"logged {n_prices} price rows + depth for {len(event['brackets'])} brackets "
+              f"| snapshot {snapshot_id[:8]} at {ts}")
 
 
 def log_predictions(target_date_str, event_slug, questions_by_label, rows,
-                     calibrated_mean, sigma, lead_time_hours):
+                     calibrated_mean, sigma, lead_time_hours, tokens_by_label=None):
     conn = get_connection()
     cur = conn.cursor()
+    snapshot_id, ts = new_snapshot_id(), utc_now_iso()   # one id/time for this event's rows
+    tokens_by_label = tokens_by_label or {}
     for r in rows:
         cur.execute("""
             INSERT INTO predictions (
                 target_date, event_slug, market_question, bracket_label,
                 model_prob, market_price, net_edge, signal, kelly_fraction,
-                bet_amount, calibrated_mean_temp, sigma_used, lead_time_hours
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                bet_amount, calibrated_mean_temp, sigma_used, lead_time_hours,
+                token_id, snapshot_id, ts_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             target_date_str, event_slug, questions_by_label.get(r["label"], r["label"]), r["label"],
             r["model_prob"], r["market_price"], r["net_edge"], r["signal"], r["kelly_fraction"],
             r["bet_amount"], calibrated_mean, sigma, lead_time_hours,
+            tokens_by_label.get(r["label"]), snapshot_id, ts,
         ))
     conn.commit()
     conn.close()
@@ -530,7 +547,7 @@ def settle_unsettled_markets():
     an edge', so it can't be optional."""
     conn = get_connection()
     cur = conn.cursor()
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = berlin_today().strftime("%Y-%m-%d")   # only settle Munich days that are over
     cur.execute("""
         SELECT DISTINCT target_date FROM predictions
         WHERE settled = 0 AND target_date < ?
@@ -609,8 +626,7 @@ def run_scanner_for_all_open_events():
         # Real lead time to this specific event's target date, instead
         # of a hardcoded 48h assumption -- matters most right after a
         # new market opens (near 62h out) vs one about to resolve.
-        target_dt = datetime.combine(event["target_date"], datetime.min.time())
-        lead_time_hours = max(0.0, (target_dt - datetime.now()).total_seconds() / 3600.0)
+        lead_time_hours = hours_until_local_day_start(event["target_date"])
 
         run_phase5_scanner(target_date_str=target_date_str, lead_time_hours=lead_time_hours,
                             pre_discovered_event=event)
@@ -663,6 +679,7 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
         market_prices = {label: b["price"] for label, b in pre_discovered_event["brackets"].items()
                           if b["price"] is not None}
         questions_by_label = {label: b["question"] for label, b in pre_discovered_event["brackets"].items()}
+        tokens_by_label = {label: b["token_id"] for label, b in pre_discovered_event["brackets"].items()}
         error_msg = None if market_prices else "No priced brackets in pre-discovered event."
     else:
         # Fallback path if called directly without discovery (e.g. manual testing).
@@ -677,6 +694,7 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
             event_slug = event["event_slug"]
             market_prices = {label: b["price"] for label, b in event["brackets"].items() if b["price"] is not None}
             questions_by_label = {label: b["question"] for label, b in event["brackets"].items()}
+            tokens_by_label = {label: b["token_id"] for label, b in event["brackets"].items()}
             error_msg = None if market_prices else "No priced brackets found."
 
     if not market_prices:
@@ -739,7 +757,7 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
     # printing to a terminal and discarding the only evidence that
     # could ever answer "is there a real edge here".
     log_predictions(target_date_str, event_slug, questions_by_label, log_rows,
-                     calibrated_mean, sigma, lead_time_hours)
+                     calibrated_mean, sigma, lead_time_hours, tokens_by_label)
 
 
 if __name__ == "__main__":

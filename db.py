@@ -232,6 +232,22 @@ NEW_COLUMNS = [
     # price_snapshots.polymarket_prob column is price x 100; kept for
     # old rows, no longer written).
     ("price_snapshots", "gamma_price", "REAL"),
+    # A8 -- explicit UTC timestamp written by Python (ISO-8601 text, sorts
+    # correctly) + one snapshot_id shared by all rows of the same snapshot.
+    # The old per-row `timestamp` DEFAULT columns are kept but not relied on.
+    # A9 -- rows keyed by token, not only by question text.
+    ("price_snapshots", "ts_utc", "TEXT"),
+    ("price_snapshots", "snapshot_id", "TEXT"),
+    ("price_snapshots", "token_id", "TEXT"),
+    ("price_snapshots", "bracket_label", "TEXT"),
+    ("orderbook_depth", "ts_utc", "TEXT"),
+    ("orderbook_depth", "snapshot_id", "TEXT"),
+    ("orderbook_depth", "token_id", "TEXT"),
+    ("orderbook_depth", "bracket_label", "TEXT"),
+    ("predictions", "ts_utc", "TEXT"),
+    ("predictions", "snapshot_id", "TEXT"),
+    ("predictions", "token_id", "TEXT"),
+    ("forecast_snapshots", "ts_utc", "TEXT"),
 ]
 
 
