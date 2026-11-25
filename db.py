@@ -296,6 +296,12 @@ NEW_COLUMNS = [
     ("forecast_snapshots", "market_kind", "TEXT"),
     ("leadtime_calibration", "market_kind", "TEXT"),
     ("predictions", "observed_min_so_far", "REAL"),   # same-day lows: EDDM routine-METAR min so far
+    # B2 -- which model run each deterministic forecast row comes from.
+    # init_time = latest run start among the model's components (UTC);
+    # run_components_json = {component: {"init": ..., "available": ...}}.
+    # ts_utc on the same row is the fetch time (fetched_at).
+    ("forecast_snapshots", "init_time", "TEXT"),
+    ("forecast_snapshots", "run_components_json", "TEXT"),
 ]
 
 KIND_TABLES = ["price_snapshots", "orderbook_depth", "predictions",

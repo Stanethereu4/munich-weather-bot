@@ -17,6 +17,7 @@ from daymax import hourly_times_local, daily_extreme_by_date, daily_extreme_for
 from timeutil import utc_now_iso, berlin_now, berlin_today, hours_until_local_day_start, new_snapshot_id
 from kelly_multi import Candidate, solve_joint_kelly
 from http_session import TimeoutSession, TimeoutCachedSession
+from om_meta import current_runs
 
 # --- CONFIGURATION ---
 LATITUDE = 48.3537   # Munich Airport (EDDM)
@@ -230,20 +231,41 @@ def fetch_live_ensemble_forecast(target_date_str, kind="high"):
     return np.array(live_vals), per_model, np.array(remaining_vals)
 
 
-def log_forecast_snapshot(target_date_str, per_model_max, kind="high"):
-    """Logs raw per-model DETERMINISTIC forecasts of the daily extreme.
-    Note: the column is called daily_max_temp_c for historical reasons;
-    for market_kind='low' rows it holds the daily MIN."""
+def log_forecast_snapshot(target_date_str, per_model_max, kind="high", runs=None):
+    """
+    B2: logs each model's DETERMINISTIC forecast of the daily extreme, tagged
+    with the model run(s) it came from -- one row per model per run. A row is
+    only written when that model's runs changed since its last row for this
+    target date and kind (otherwise nothing new was released).
+    Note: the column is called daily_max_temp_c for historical reasons; for
+    market_kind='low' rows it holds the daily MIN.
+    """
+    runs = runs or {}
     conn = get_connection()
     cur = conn.cursor()
     ts = utc_now_iso()
+    written = []
     for model_key, val in per_model_max.items():
+        info = runs.get(model_key, {})
+        comps_json = json.dumps(info.get("components", {}), sort_keys=True)
         cur.execute("""
-            INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c, ts_utc, market_kind)
-            VALUES (?, ?, ?, ?, ?)
-        """, (target_date_str, model_key, val, ts, kind))
+            SELECT run_components_json FROM forecast_snapshots
+            WHERE target_date = ? AND model_key = ? AND market_kind = ? AND run_components_json IS NOT NULL
+            ORDER BY id DESC LIMIT 1
+        """, (target_date_str, model_key, kind))
+        last = cur.fetchone()
+        if last and last[0] == comps_json and info.get("components"):
+            continue                                  # same run(s) as last time: nothing new
+        cur.execute("""
+            INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c, ts_utc, market_kind,
+                                            init_time, run_components_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (target_date_str, model_key, val, ts, kind, info.get("init_time"), comps_json))
+        written.append(model_key)
     conn.commit()
     conn.close()
+    if written:
+        print(f"[forecast-log] new run(s) for {written} -> logged")
 
 
 # Ensemble sources, corrected against Open-Meteo's actual documented
@@ -950,8 +972,9 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
     print(f"[*] Blend weights ({origin} for {berlin_today()}, {kind}): {weights_str} | "
           f"Station Bias: {opt_b:+.2f} °C")
 
+    runs = current_runs(MODELS.keys())   # which run each model is on, read just before the fetch
     live_X, per_model_max, remaining_X = fetch_live_ensemble_forecast(target_date_str, kind)
-    log_forecast_snapshot(target_date_str, per_model_max, kind)  # every run here; cron this at 3-6h cadence, not every scan
+    log_forecast_snapshot(target_date_str, per_model_max, kind, runs)  # every run here; cron this at 3-6h cadence, not every scan
     fetch_and_log_all_ensemble_members(target_date_str)     # raw member logging -- additive, doesn't feed live prediction
 
     if np.isnan(live_X).any():
