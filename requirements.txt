@@ -6,3 +6,4 @@ openmeteo-requests
 requests-cache
 retry-requests
 flask
+psycopg2-binary

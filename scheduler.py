@@ -80,19 +80,13 @@ class BotScheduler:
             print(f"[scheduler] ERROR during {label}: {self.last_error}")
 
     def _do_price_run(self):
-        target_date = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
-        market_prices, questions_by_label, event_slug, error_msg = bot.fetch_polymarket_orderbook_snapshot(target_date)
-        if market_prices is None:
-            print(f"[scheduler] prices-only: no market found: {error_msg}")
-        else:
-            bot.log_price_snapshot(event_slug, market_prices, questions_by_label)
+        bot.run_prices_only_all_open_events()
         self.last_price_run = datetime.now()
         self.run_count_prices += 1
 
     def _do_full_run(self):
         bot.settle_unsettled_markets()
-        target_date = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
-        bot.run_phase5_scanner(target_date_str=target_date, lead_time_hours=48)
+        bot.run_scanner_for_all_open_events()
         self.last_full_run = datetime.now()
         self.run_count_full += 1
 

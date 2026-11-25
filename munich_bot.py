@@ -63,8 +63,13 @@ def parse_label_to_bounds(label):
         '17°C'          -> (16.5, 17.5)
         '26°C or higher' -> (25.5, None)
     """
-    clean_label = label.replace("°C", "").replace("°", "").strip()
-    numbers = re.findall(r"[-+]?\d*\.\d+|\d+", clean_label)
+    # Normalise unicode minus/dashes so negative temps keep their sign.
+    clean_label = (label.replace("°C", "").replace("°", "")
+                   .replace("\u2212", "-").replace("\u2013", "-").strip())
+    # Sign is optional on BOTH integers and decimals. (The old pattern
+    # r"[-+]?\d*\.\d+|\d+" dropped the minus on integers, so
+    # "-5°C or below" parsed as 5 -> ~100% model probability.)
+    numbers = re.findall(r"[-+]?\d+(?:\.\d+)?", clean_label)
     if not numbers:
         return None, None
     val = float(numbers[0])
@@ -149,8 +154,9 @@ def fetch_live_ensemble_forecast(target_date_str):
 
 
 def log_forecast_snapshot(target_date_str, per_model_max):
-    """Logs raw per-model forecasts -- call this every 3-6h, not every
-    run, to match actual model-run cadence (see db.py docstring)."""
+    """Logs raw per-model DETERMINISTIC forecasts -- call this every
+    3-6h, not every run, to match actual model-run cadence (see
+    db.py docstring)."""
     conn = get_connection()
     cur = conn.cursor()
     for model_key, val in per_model_max.items():
@@ -160,6 +166,121 @@ def log_forecast_snapshot(target_date_str, per_model_max):
         """, (target_date_str, model_key, val))
     conn.commit()
     conn.close()
+
+
+# Ensemble sources, corrected against Open-Meteo's actual documented
+# parameter names (my earlier list had two wrong identifiers: GFS-ENS
+# is "ncep_gefs025", not "gfs025"; ECMWF-ENS needs the "_ensemble"
+# suffix -- "ecmwf_ifs025_ensemble", not "ecmwf_ifs025").
+#
+# meteoswiss_icon_ch1/ch2 and ukmo_uk_ensemble_2km were initially left
+# out over domain-coverage uncertainty -- confirmed via direct check
+# that both return real values for Munich's coordinates, so they're
+# included now. Worth keeping in mind these are high-res regional
+# models where Munich sits closer to the domain edge than their
+# center, so treat them as legitimate extra signal, not necessarily
+# as reliable as the models built around Germany specifically
+# (icon_d2_eps, icon_eu_eps).
+#
+# Deliberately still left out: icon_seamless_eps, ncep_gefs_seamless,
+# ncep_gefs05 -- these are lower-resolution or blended variants of
+# models already covered at higher fidelity below (icon_d2_eps +
+# icon_eu_eps + icon_global_eps already span ICON's seamless range;
+# ncep_gefs025 is GEFS at its best available resolution). Adding the
+# lower-res versions alongside the higher-res ones would mostly just
+# duplicate signal, not add new information -- revisit if that
+# assumption turns out wrong once you have real data to check it against.
+#
+# Member counts are NOT hardcoded anywhere in the fetch/reduction
+# logic below (it reads hourly.VariablesLength() live), so this list
+# can be edited freely without touching any other code.
+ENSEMBLE_MODELS = {
+    "icon_d2_eps": "ICON-D2-EPS",                        # DWD, Germany-domain, highest res
+    "icon_eu_eps": "ICON-EU-EPS",                          # DWD, Europe-domain
+    "icon_global_eps": "ICON-Global-EPS",                  # DWD, global
+    "meteoswiss_icon_ch1_ensemble": "MeteoSwiss-ICON-CH1",  # confirmed covers Munich
+    "meteoswiss_icon_ch2_ensemble": "MeteoSwiss-ICON-CH2",  # confirmed covers Munich
+    "ncep_gefs025": "GFS-ENS",                              # NOAA, global, 0.25deg
+    "ncep_aigefs025": "AI-GEFS",                            # NOAA, AI-based variant
+    "ecmwf_ifs025_ensemble": "ECMWF-ENS",                  # global, 0.25deg
+    "ecmwf_ifs_europe_ensemble": "ECMWF-ENS-Europe",       # higher-res Europe domain
+    "ecmwf_aifs025_ensemble": "ECMWF-AIFS",                # ECMWF's AI-based ensemble
+    "ecmwf_aifs_europe_ensemble": "ECMWF-AIFS-Europe",     # AI ensemble, Europe domain
+    "gem_global_ensemble": "GEM-ENS",                       # Environment Canada, global
+    "google_weathernext2_ensemble": "GraphCast-ENS",        # Google's AI ensemble
+    "ukmo_uk_ensemble_2km": "UKMO-UK-2km",                  # confirmed covers Munich
+    "ukmo_global_ensemble_20km": "UKMO-Global",             # UK Met Office, global
+}
+
+
+def fetch_and_log_all_ensemble_members(target_date_str):
+    """
+    Logs EVERY individual raw ensemble member (not just the blended
+    point forecast) to forecast_snapshots, purely as insurance for
+    future use. The live prediction pipeline
+    (fetch_live_ensemble_forecast + SLSQP blend + Gaussian sigma) is
+    UNCHANGED and does not read from this -- this is pure logging,
+    additive, and safe to fail without affecting predictions.
+
+    Why log it now even though nothing consumes it yet: this history
+    cannot be reconstructed retroactively. If a future backtest wants
+    to build an empirical (non-Gaussian) probability distribution
+    instead of assuming a bell curve, it needs raw members from every
+    day that's already passed -- logging starts the clock on that,
+    the live Gaussian pipeline doesn't need to change to benefit later.
+    """
+    url = "https://ensemble-api.open-meteo.com/v1/ensemble"
+    params = {
+        "latitude": LATITUDE, "longitude": LONGITUDE,
+        "start_date": target_date_str, "end_date": target_date_str,
+        "hourly": "temperature_2m",
+        "models": list(ENSEMBLE_MODELS.keys()),
+        "timezone": "Europe/Berlin",
+    }
+    try:
+        responses = openmeteo.weather_api(url, params=params)
+    except Exception as e:
+        print(f"[ensemble-log] fetch failed for {target_date_str}: {e}")
+        return 0
+
+    conn = get_connection()
+    cur = conn.cursor()
+    total_logged = 0
+
+    for model_key, response in zip(ENSEMBLE_MODELS.keys(), responses):
+        hourly = response.Hourly()
+        times = hourly.Time()
+        step = hourly.Interval()
+        num_members = hourly.VariablesLength()
+        model_logged = 0
+
+        for i in range(num_members):
+            vals = hourly.Variables(i).ValuesAsNumpy()
+            ts_utc = pd.to_datetime(np.arange(times, times + len(vals) * step, step),
+                                     unit="s", utc=True)
+            ts_local = ts_utc.tz_convert("Europe/Berlin")
+            df = pd.DataFrame({"dt": ts_local, "temp": vals})
+            daytime = df[(df["dt"].dt.hour >= 10) & (df["dt"].dt.hour <= 19)]
+            valid = daytime["temp"].dropna()
+            if len(valid) == 0:
+                continue
+            member_max = float(valid.max())
+            cur.execute("""
+                INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c)
+                VALUES (?, ?, ?)
+            """, (target_date_str, f"{model_key}_member{i:02d}", member_max))
+            total_logged += 1
+            model_logged += 1
+
+        print(f"[ensemble-log]   {model_key} ({ENSEMBLE_MODELS[model_key]}): "
+              f"{model_logged}/{num_members} members logged")
+
+    conn.commit()
+    conn.close()
+    print(f"[ensemble-log] logged {total_logged} raw member rows for {target_date_str} "
+          f"across {len(ENSEMBLE_MODELS)} ensemble sources "
+          f"(per-source breakdown printed below if you need to sanity-check counts)")
+    return total_logged
 
 
 def fetch_calibration_data(target_date_str):
@@ -219,49 +340,135 @@ def fetch_calibration_data(target_date_str):
     return X_tr, y_tr
 
 
-def fetch_polymarket_orderbook_snapshot(target_date_str):
-    target_dt = datetime.strptime(target_date_str, "%Y-%m-%d")
-    slug_date = f"{target_dt.strftime('%B').lower()}-{target_dt.day}-{target_dt.year}"
-    slug = f"highest-temperature-in-munich-on-{slug_date}"
+def discover_open_munich_events():
+    """
+    Replaces the old approach of computing ONE guessed target_date
+    (now + 2 days) and building a single slug for it. That silently
+    missed the fact that Polymarket weather markets for different
+    target dates run IN PARALLEL -- a new market opens at 00:56 ET,
+    exactly 2 days before its target date, while the previous day's
+    market is often still open too.
 
-    url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+    Instead, this searches Gamma for every currently OPEN
+    ("closed": false) Munich temperature event, regardless of how many
+    there are. Running this every 15 minutes means a newly-opened
+    market gets picked up within 15 minutes of going live, without
+    needing to hardcode the exact 00:56 ET opening timestamp anywhere
+    -- discovery-based polling naturally handles it.
+
+    Returns a list of dicts: {event_slug, title, target_date (date obj
+    or None if unparseable), brackets: {label: {token_id, question}}}
+    """
+    url = "https://gamma-api.polymarket.com/events"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         "Accept": "application/json",
     }
+    params = {"search": "highest temperature in munich", "closed": "false", "limit": 20}
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, params=params, timeout=15)
         response.raise_for_status()
-        res = response.json()
-
-        if res and isinstance(res, list) and len(res) > 0:
-            title = res[0].get("title", slug)
-            markets = res[0].get("markets", [])
-            parsed_brackets = {}
-            questions_by_label = {}
-
-            for m in markets:
-                label = m.get("groupItemTitle") or m.get("question")
-                prices_raw = m.get("outcomePrices")
-                if prices_raw:
-                    prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
-                    if len(prices) > 0:
-                        parsed_brackets[label] = float(prices[0])
-                        questions_by_label[label] = m.get("question", label)
-
-            if parsed_brackets:
-                print(f"[*] Market Source : LIVE - Polymarket Event: '{title}'")
-                print(f"[*] Market URL    : https://polymarket.com/event/{slug}")
-                return parsed_brackets, questions_by_label, slug, None
-
-        return None, None, slug, f"API Response Empty for slug '{slug}'."
-
-    except requests.exceptions.HTTPError as http_err:
-        return None, None, slug, f"HTTP Error: {http_err} (Status Code: {response.status_code})"
+        events = response.json()
     except Exception as e:
-        return None, None, slug, f"Parsing/Connection Error: {e}"
+        print(f"[discovery] Failed to fetch open Munich events: {e}")
+        return []
+
+    results = []
+    for event in events:
+        title = event.get("title", "")
+        slug = event.get("slug", "")
+        if "munich" not in title.lower():
+            continue  # Gamma search is fuzzy, filter defensively
+
+        target_date = _parse_target_date_from_slug(slug)
+
+        brackets = {}
+        for m in event.get("markets", []):
+            label = m.get("groupItemTitle") or m.get("question")
+            question = m.get("question", label)
+            token_ids = m.get("clobTokenIds")
+            prices_raw = m.get("outcomePrices")
+            if not token_ids:
+                continue
+            token_id = json.loads(token_ids)[0] if isinstance(token_ids, str) else token_ids[0]
+            price = None
+            if prices_raw:
+                prices = json.loads(prices_raw) if isinstance(prices_raw, str) else prices_raw
+                if len(prices) > 0:
+                    price = float(prices[0])
+            brackets[label] = {"token_id": token_id, "question": question, "price": price}
+
+        if brackets:
+            results.append({
+                "event_slug": slug, "title": title,
+                "target_date": target_date, "brackets": brackets,
+            })
+
+    return results
+
+
+def _parse_target_date_from_slug(slug: str):
+    """Extracts the target date from slugs like
+    'highest-temperature-in-munich-on-august-24-2026'. Returns a
+    datetime.date, or None if the slug doesn't match the expected
+    pattern (logged, not silently swallowed, since a parsing miss
+    means lead-time-hours can't be computed for that event)."""
+    match = re.search(r"on-([a-z]+)-(\d{1,2})-(\d{4})$", slug.lower())
+    if not match:
+        print(f"[discovery] WARNING: could not parse target date from slug '{slug}'")
+        return None
+    month_str, day_str, year_str = match.groups()
+    try:
+        return datetime.strptime(f"{month_str} {day_str} {year_str}", "%B %d %Y").date()
+    except ValueError:
+        print(f"[discovery] WARNING: date parse failed for slug '{slug}'")
+        return None
+
+
+def fetch_orderbook_depth(token_id: str):
+    """
+    Fetches full L2 order book depth (all visible price levels, not
+    just best bid/ask) for one outcome token via Polymarket's CLOB API.
+    This is the piece needed to actually test 'could we have gotten
+    filled at this size' in a backtest, instead of assuming infinite
+    liquidity at the last-trade price.
+
+    Endpoint per Polymarket's CLOB API docs -- verify against a live
+    response on first run, response shape can vary.
+    """
+    url = "https://clob.polymarket.com/book"
+    try:
+        response = requests.get(url, params={"token_id": token_id}, timeout=10)
+        response.raise_for_status()
+        book = response.json()
+        return book.get("bids", []), book.get("asks", [])
+    except Exception as e:
+        print(f"[orderbook] Failed to fetch depth for token {token_id}: {e}")
+        return [], []
+
+
+def log_orderbook_depth(event_slug, question, bids, asks):
+    """Logs every visible price level, not just top-of-book. Cadence:
+    call this from the 15-min prices-only path -- see db.py docstring,
+    this was upgraded from the original 'hourly to start' plan since
+    it now piggybacks on the same discovery pass as price logging at
+    no extra API-call cost."""
+    conn = get_connection()
+    cur = conn.cursor()
+    for level in bids:
+        cur.execute("""
+            INSERT INTO orderbook_depth (event_slug, market_question, side, price_level, size)
+            VALUES (?, ?, ?, ?, ?)
+        """, (event_slug, question, "bid", float(level.get("price", 0)), float(level.get("size", 0))))
+    for level in asks:
+        cur.execute("""
+            INSERT INTO orderbook_depth (event_slug, market_question, side, price_level, size)
+            VALUES (?, ?, ?, ?, ?)
+        """, (event_slug, question, "ask", float(level.get("price", 0)), float(level.get("size", 0))))
+    conn.commit()
+    conn.close()
 
 
 def log_price_snapshot(event_slug, market_prices, questions_by_label):
@@ -277,6 +484,36 @@ def log_price_snapshot(event_slug, market_prices, questions_by_label):
     conn.close()
     print(f"[prices-only] logged {len(market_prices)} rows for {event_slug} "
           f"at {datetime.now().isoformat()}")
+
+
+def run_prices_only_all_open_events():
+    """
+    NEW default for --prices-only: instead of computing one guessed
+    target_date and fetching just that market, discovers and logs
+    EVERY currently open Munich event -- so markets running in
+    parallel (today's + tomorrow's newly-opened one) both get logged
+    automatically, and order book depth is captured alongside price
+    at no extra discovery cost.
+    """
+    events = discover_open_munich_events()
+    if not events:
+        print("[prices-only] no open Munich events found this run.")
+        return
+
+    for event in events:
+        market_prices = {label: b["price"] for label, b in event["brackets"].items()
+                          if b["price"] is not None}
+        questions_by_label = {label: b["question"] for label, b in event["brackets"].items()}
+        if market_prices:
+            log_price_snapshot(event["event_slug"], market_prices, questions_by_label)
+
+        for label, b in event["brackets"].items():
+            bids, asks = fetch_orderbook_depth(b["token_id"])
+            if bids or asks:
+                log_orderbook_depth(event["event_slug"], b["question"], bids, asks)
+
+        print(f"[prices-only] {event['event_slug']} (target_date={event['target_date']}): "
+              f"logged {len(market_prices)} price rows + depth for {len(event['brackets'])} brackets")
 
 
 def log_predictions(target_date_str, event_slug, questions_by_label, rows,
@@ -307,10 +544,11 @@ def settle_unsettled_markets():
     an edge', so it can't be optional."""
     conn = get_connection()
     cur = conn.cursor()
+    today_str = datetime.now().strftime("%Y-%m-%d")
     cur.execute("""
         SELECT DISTINCT target_date FROM predictions
-        WHERE settled = 0 AND target_date < DATE('now', 'localtime')
-    """)
+        WHERE settled = 0 AND target_date < ?
+    """, (today_str,))
     unsettled_dates = cur.fetchall()
     if not unsettled_dates:
         print("[DB] No past unsettled predictions found.")
@@ -366,7 +604,37 @@ def settle_unsettled_markets():
     conn.close()
 
 
-def run_phase5_scanner(target_date_str, lead_time_hours):
+def run_scanner_for_all_open_events():
+    """
+    Replaces the old single-market call. Discovers every currently
+    open Munich event, and runs the full calibration+scan+Kelly+log
+    flow separately for EACH one -- calibration/live-forecast/sigma
+    all depend on that specific event's target_date, and Kelly sizing
+    must stay scoped to one event's mutually-exclusive brackets, not
+    mixed across events.
+    """
+    events = discover_open_munich_events()
+    if not events:
+        print("[full-run] no open Munich events found this run.")
+        return
+
+    for event in events:
+        if event["target_date"] is None:
+            print(f"[full-run] skipping {event['event_slug']} -- couldn't parse target date")
+            continue
+
+        target_date_str = event["target_date"].strftime("%Y-%m-%d")
+        # Real lead time to this specific event's target date, instead
+        # of a hardcoded 48h assumption -- matters most right after a
+        # new market opens (near 62h out) vs one about to resolve.
+        target_dt = datetime.combine(event["target_date"], datetime.min.time())
+        lead_time_hours = max(0.0, (target_dt - datetime.now()).total_seconds() / 3600.0)
+
+        run_phase5_scanner(target_date_str=target_date_str, lead_time_hours=lead_time_hours,
+                            pre_discovered_event=event)
+
+
+def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=None):
     print("\n" + "=" * 105)
     print(f" PHASE 5: POLYMARKET EDGE & KELLY POSITION SCANNER | TARGET DATE: {target_date_str}")
     print("=" * 105)
@@ -391,6 +659,7 @@ def run_phase5_scanner(target_date_str, lead_time_hours):
 
     live_X, per_model_max = fetch_live_ensemble_forecast(target_date_str)
     log_forecast_snapshot(target_date_str, per_model_max)  # every run here; cron this at 3-6h cadence, not every scan
+    fetch_and_log_all_ensemble_members(target_date_str)     # raw member logging -- additive, doesn't feed live prediction
 
     calibrated_mean = np.dot(live_X, opt_w) + opt_b
     sigma = get_horizon_sigma(lead_time_hours)  # NOW REAL, from leadtime_calibration
@@ -398,9 +667,31 @@ def run_phase5_scanner(target_date_str, lead_time_hours):
           f"Measured Sigma: {sigma:.2f} °C)")
 
     print("\n[*] Fetching Polymarket order book...")
-    market_prices, questions_by_label, event_slug, error_msg = fetch_polymarket_orderbook_snapshot(target_date_str)
+    if pre_discovered_event is not None:
+        # Reuse the event already fetched by discover_open_munich_events()
+        # in run_scanner_for_all_open_events() -- avoids a redundant
+        # Gamma call per event.
+        event_slug = pre_discovered_event["event_slug"]
+        market_prices = {label: b["price"] for label, b in pre_discovered_event["brackets"].items()
+                          if b["price"] is not None}
+        questions_by_label = {label: b["question"] for label, b in pre_discovered_event["brackets"].items()}
+        error_msg = None if market_prices else "No priced brackets in pre-discovered event."
+    else:
+        # Fallback path if called directly without discovery (e.g. manual testing).
+        matches = [e for e in discover_open_munich_events()
+                   if e["target_date"] is not None
+                   and e["target_date"].strftime("%Y-%m-%d") == target_date_str]
+        if not matches:
+            market_prices, questions_by_label, event_slug, error_msg = None, None, None, \
+                f"No open event found for target_date {target_date_str}"
+        else:
+            event = matches[0]
+            event_slug = event["event_slug"]
+            market_prices = {label: b["price"] for label, b in event["brackets"].items() if b["price"] is not None}
+            questions_by_label = {label: b["question"] for label, b in event["brackets"].items()}
+            error_msg = None if market_prices else "No priced brackets found."
 
-    if market_prices is None:
+    if not market_prices:
         print(f"\n[!] ABORTING SCAN: Market is offline or unreadable ({error_msg}).")
         print("=" * 105)
         return
@@ -466,19 +757,14 @@ def run_phase5_scanner(target_date_str, lead_time_hours):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--prices-only", action="store_true",
-                         help="Lightweight 15-min price snapshot, skips the full model run.")
+                         help="Lightweight 15-min price + order book depth snapshot "
+                              "across ALL currently open Munich markets.")
     args = parser.parse_args()
 
     init_db()
 
     if args.prices_only:
-        target_date = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
-        market_prices, questions_by_label, event_slug, error_msg = fetch_polymarket_orderbook_snapshot(target_date)
-        if market_prices is None:
-            print(f"[prices-only] no market found: {error_msg}")
-        else:
-            log_price_snapshot(event_slug, market_prices, questions_by_label)
+        run_prices_only_all_open_events()
     else:
         settle_unsettled_markets()
-        target_date = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
-        run_phase5_scanner(target_date_str=target_date, lead_time_hours=48)
+        run_scanner_for_all_open_events()

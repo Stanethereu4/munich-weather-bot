@@ -75,6 +75,15 @@
   </div>
 </section>
 
+<section>
+  <h2>Order Book Depth (recent)</h2>
+  <div class="scroll">
+    <table id="orderbookTable"><thead><tr>
+      <th>Time</th><th>Event</th><th>Bracket</th><th>Side</th><th>Price</th><th>Size</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
 <script>
 async function fetchJSON(url, opts) {
   const res = await fetch(url, opts);
@@ -170,8 +179,24 @@ async function refreshCalibration() {
   </tr>`).join('');
 }
 
+async function refreshOrderbook() {
+  const rows = await fetchJSON('/api/orderbook');
+  const tbody = document.querySelector('#orderbookTable tbody');
+  tbody.innerHTML = rows.map(r => {
+    const sideClass = r.side === 'bid' ? 'buy-yes' : 'buy-no';
+    return `<tr>
+      <td>${(r.timestamp || '').slice(0,16)}</td>
+      <td>${r.event_slug}</td>
+      <td>${r.market_question}</td>
+      <td class="${sideClass}">${r.side}</td>
+      <td>${fmt(r.price_level,3)}</td>
+      <td>${fmt(r.size,1)}</td>
+    </tr>`;
+  }).join('');
+}
+
 async function refreshAll() {
-  await Promise.all([refreshStatus(), refreshSummary(), refreshPredictions(), refreshPrices(), refreshCalibration()]);
+  await Promise.all([refreshStatus(), refreshSummary(), refreshPredictions(), refreshPrices(), refreshCalibration(), refreshOrderbook()]);
 }
 
 refreshAll();

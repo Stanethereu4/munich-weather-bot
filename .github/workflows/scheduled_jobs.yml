@@ -1,13 +1,33 @@
 name: Munich Weather Bot - Scheduled Logging
 
+# Two separate schedules matching the two logging cadences from db.py:
+#   - price snapshots every 15 minutes
+#   - full model run every 4 hours
+#
+# IMPORTANT LIMITATION, stated plainly: GitHub auto-disables scheduled
+# workflows on a repo after 60 days with NO commits/pushes to that
+# repo. If you go two months without touching this repo at all, the
+# schedule silently stops -- check the Actions tab occasionally, or
+# push any small commit (even just editing this comment) to reset the
+# clock. This is a GitHub platform limit, not something fixable in
+# the workflow file itself.
+#
+# Also note: GitHub's cron scheduler is best-effort, not exact -- jobs
+# can run a few minutes late during high load. Fine for this use case
+# (you're not doing sub-minute-precision trading), not fine if you
+# ever need guaranteed exact-time execution.
+
 on:
   schedule:
-    - cron: "*/15 * * * *"
-    - cron: "0 */4 * * *"
-  workflow_dispatch: {}
+    - cron: "*/15 * * * *"   # every 15 minutes -- price snapshots
+    - cron: "0 */4 * * *"    # every 4 hours -- full model run + settlement
+  workflow_dispatch: {}       # lets you manually trigger a run from the Actions tab, for testing
 
 jobs:
   prices-only:
+    # Only actually do work on the 15-min schedule trigger; the 4h
+    # trigger below handles the full run. Both schedules fire this
+    # workflow, so each job checks which cron expression triggered it.
     if: github.event.schedule == '*/15 * * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5

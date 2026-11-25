@@ -84,13 +84,23 @@ def api_calibration():
     return jsonify(data)
 
 
+@app.route("/api/orderbook")
+def api_orderbook():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM orderbook_depth ORDER BY id DESC LIMIT 100")
+    data = rows_as_dicts(cur)
+    conn.close()
+    return jsonify(data)
+
+
 @app.route("/api/summary")
 def api_summary():
     """Quick counts so the dashboard can show 'how much data do I actually have' at a glance."""
     conn = get_connection()
     cur = conn.cursor()
     out = {}
-    for table in ["predictions", "price_snapshots", "forecast_snapshots", "leadtime_calibration"]:
+    for table in ["predictions", "price_snapshots", "forecast_snapshots", "leadtime_calibration", "orderbook_depth"]:
         cur.execute(f"SELECT COUNT(*) FROM {table}")
         out[table] = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM predictions WHERE settled = 1")
