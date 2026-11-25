@@ -375,6 +375,33 @@ if "ens-recent" in probes:
         show("ensemble-api previous_day1", get("https://ensemble-api.open-meteo.com/v1/ensemble",
              {**loc, "models": m, "hourly": "temperature_2m_previous_day1", "past_days": 3, "forecast_days": 1}))
 
+if "ens-prev" in probes:
+    # Ensemble MEAN with previous_dayN (forecast issued N days earlier): history depth and spread availability.
+    import time
+    section("Ensemble mean previous_dayN: depth and spread")
+    loc = {"latitude": 48.3537, "longitude": 11.786, "timezone": "UTC"}
+    vars_ = ",".join(f"temperature_2m_previous_day{n},temperature_2m_spread_previous_day{n}" for n in (1, 2, 3))
+    for m in ["ecmwf_ifs025_ensemble_mean", "dwd_icon_eps_ensemble_mean_seamless", "ncep_gefs_ensemble_mean_seamless",
+              "ecmwf_aifs025_ensemble_mean", "gem_global_ensemble_mean", "ukmo_global_ensemble_mean_20km"]:
+        r = None
+        for k in range(3):
+            try:
+                r = requests.get("https://ensemble-api.open-meteo.com/v1/ensemble", params={**loc, "models": m,
+                    "hourly": vars_, "start_date": "2026-08-24", "end_date": "2026-11-25"}, headers=H, timeout=(10, 90)); break
+            except requests.RequestException:
+                time.sleep(5 * (k + 1))
+        if r is None:
+            print(f"{m}: no response"); continue
+        j = r.json()
+        if r.status_code != 200:
+            print(f"{m}: {r.status_code} {str(j.get('reason',''))[:120]}"); continue
+        h = j["hourly"]; t = h["time"]
+        print(f"{m}: {len(t)} hours {t[0]}..{t[-1]}")
+        for k, v in h.items():
+            if k == "time": continue
+            nn = [i for i, x in enumerate(v) if x is not None]
+            print(f"   {k}: non-null {len(nn)}/{len(v)} first {t[nn[0]] if nn else None} sample@2026-10-15T12={v[t.index('2026-10-15T12:00')]}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
