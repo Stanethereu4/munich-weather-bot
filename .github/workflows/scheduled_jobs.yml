@@ -28,6 +28,11 @@ on:
           - once             # one price snapshot + one full run, then stop (testing)
           - calibrate        # measure forecast error per horizon -> leadtime_calibration
           - check-station    # compare EDDM station sources for the last 7 days (read-only)
+          - probe            # print real API response structures (tools/probe_apis.py)
+      probe_args:
+        description: "For task=probe: which probes to run (space-separated, empty = default set)"
+        type: string
+        default: ""
 
 env:
   PYTHONUNBUFFERED: "1"   # print output immediately (otherwise lost if a run is killed)
@@ -96,7 +101,7 @@ jobs:
     if: >-
       github.event.schedule == '17 3 * * 1' ||
       (github.event_name == 'workflow_dispatch' &&
-       (inputs.task == 'calibrate' || inputs.task == 'check-station'))
+       (inputs.task == 'calibrate' || inputs.task == 'check-station' || inputs.task == 'probe'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -110,6 +115,9 @@ jobs:
       - name: Compare station sources
         if: inputs.task == 'check-station'
         run: python3 station_obs.py
+      - name: Probe external APIs (read-only)
+        if: inputs.task == 'probe'
+        run: python3 tools/probe_apis.py ${{ inputs.probe_args }}
       - name: Measure lead-time calibration
         if: github.event_name == 'schedule' || inputs.task == 'calibrate'
         env:
