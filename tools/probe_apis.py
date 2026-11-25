@@ -237,6 +237,30 @@ if "price-history-2" in probes:
                 print(f"   trade {datetime.fromtimestamp(ts, timezone.utc):%m-%d %H:%M:%S} price {x.get('price')} "
                       f"side {x.get('side')} | CLOB same minute {by_min.get(ts // 60)} next minute {by_min.get(ts // 60 + 1)}")
 
+if "om-meta" in probes:
+    # B1/B2: when does each model's latest run become available on Open-Meteo?
+    # Candidate per-model status files behind open-meteo.com/en/docs/model-updates.
+    section("Open-Meteo per-model metadata (static/meta.json)")
+    from datetime import datetime, timezone
+    candidates = ["ecmwf_ifs025", "ecmwf_ifs", "dwd_icon", "dwd_icon_eu", "dwd_icon_d2",
+                  "ncep_gfs025", "ncep_gfs013", "cmc_gem_gdps", "meteofrance_arpege_europe",
+                  "meteofrance_arome_france", "meteofrance_arome_france_hd"]
+    first = True
+    for name in candidates:
+        url = f"https://api.open-meteo.com/data/{name}/static/meta.json"
+        r = requests.get(url, headers=H, timeout=20)
+        if r.status_code != 200:
+            print(f"{name:<30} {r.status_code}")
+            continue
+        j = r.json()
+        if first:
+            print(f"full response for {name}:"); shape(j); first = False
+        fmt = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%m-%d %H:%M") if isinstance(t, (int, float)) else t
+        print(f"{name:<30} init {fmt(j.get('last_run_initialisation_time'))} | "
+              f"available {fmt(j.get('last_run_availability_time'))} | "
+              f"modified {fmt(j.get('last_run_modification_time'))} | "
+              f"update every {j.get('update_interval_seconds')}s")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
