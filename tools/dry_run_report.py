@@ -1,0 +1,18 @@
+"""Print a short summary of the throwaway SQLite DB after a dry run."""
+import sqlite3
+
+c = sqlite3.connect("weather_bot.db")
+q = lambda sql: c.execute(sql).fetchall()
+print("price_snapshots:", q("SELECT COUNT(*), COUNT(DISTINCT snapshot_id), COUNT(token_id), COUNT(best_ask) FROM price_snapshots"),
+      "(rows, snapshots, rows with token, rows with best_ask)")
+print("units check (all must be 0-1):", q("SELECT MIN(gamma_price), MAX(gamma_price), MIN(mid), MAX(mid) FROM price_snapshots"))
+for r in q("""SELECT bracket_label, gamma_price, best_bid, best_ask, mid, bid_depth_5c, ask_depth_5c, ts_utc
+              FROM price_snapshots ORDER BY id LIMIT 12"""):
+    print("  ", r)
+print("orderbook_depth:", q("SELECT COUNT(*), COUNT(token_id), COUNT(DISTINCT snapshot_id) FROM orderbook_depth"))
+print("predictions:", q("SELECT COUNT(*), COUNT(token_id), COUNT(entry_cost) FROM predictions"))
+for r in q("""SELECT target_date, bracket_label, ROUND(model_prob,3), market_price, best_bid, best_ask,
+                     ROUND(entry_cost,4), signal, ROUND(lead_time_hours,1), ts_utc
+              FROM predictions ORDER BY id"""):
+    print("  ", r)
+print("forecast_snapshots:", q("SELECT COUNT(*), COUNT(ts_utc) FROM forecast_snapshots"))
