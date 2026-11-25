@@ -70,7 +70,10 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 # the EDDM routine-METAR max (whole °C, 366 days, 22 Nov 2025-22 Nov 2026).
 # Only used if leadtime_calibration is empty.
 FALLBACK_SIGMAS = [(0, 0.58), (1, 1.15), (2, 1.35), (3, 1.50)]
-FALLBACK_SIGMAS_BY_KIND = {"high": FALLBACK_SIGMAS, "low": None}   # 'low' filled in below once measured
+# Lows measured the same way on 25 Nov (daily MIN vs EDDM routine-METAR min):
+# night-time minima are clearly harder to forecast than daytime maxima.
+FALLBACK_SIGMAS_LOW = [(0, 0.96), (1, 1.53), (2, 1.88), (3, 2.06)]
+FALLBACK_SIGMAS_BY_KIND = {"high": FALLBACK_SIGMAS, "low": FALLBACK_SIGMAS_LOW}
 
 
 # ---------------------------------------------------------------------

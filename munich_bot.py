@@ -65,8 +65,10 @@ MODELS = {
 #    calibration) doesn't change between runs, so caching only saves calls.
 # Both sessions apply a default timeout (http_session.py): without one, a
 # stalled Open-Meteo call blocked the whole run indefinitely.
+# Live calls retry 4 times, waiting 1, 2, 4, 8 s: api.open-meteo.com drops
+# out briefly from GitHub's machines (seen 25 Nov), and longer waits bridge it.
 openmeteo_live = openmeteo_requests.Client(
-    session=retry(TimeoutSession(), retries=3, backoff_factor=0.3))
+    session=retry(TimeoutSession(), retries=4, backoff_factor=1.0))
 openmeteo_hist = openmeteo_requests.Client(
     session=retry(TimeoutCachedSession('.cache_phase5_kelly', expire_after=3600),
                   retries=3, backoff_factor=0.3))
