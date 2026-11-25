@@ -3,19 +3,26 @@ station_obs.py
 --------------
 Ground truth = what Polymarket actually resolves on.
 
-Munich markets resolve on the highest temperature in the Wunderground
-"Daily Observations" table for Munich Airport (EDDM), in whole degrees
-Celsius, for the local calendar day (Europe/Berlin). That table is
-built from the airport's METAR reports, so the daily max of the
-METAR temperatures over the local day is the closest reproducible
-proxy. Gridded reanalysis (Open-Meteo archive) is NOT: it can differ
-from the station by around a degree, which is a whole bracket.
+Polymarket's rules (read from the live market description, 25 Nov 2026):
+  - source: ROUTINE METAR reports for Munich Airport (EDDM) published by
+    aviationweather.gov (NOAA AWC). SPECI (special) reports do NOT count.
+  - value: the hourly T-group remark in tenths if present, otherwise the
+    whole-degree temperature in the report body. (EDDM reports carry no
+    T-group, so in practice whole degrees.)
+  - the max over all reports whose time falls on the local date
+    (Europe/Berlin), rounded half UP to a whole degree.
+  - Wunderground is only a fallback if AWC publishes nothing.
+Gridded reanalysis (Open-Meteo archive) can differ from the station by
+about a degree, i.e. a whole bracket, so it is never used as truth.
 
 Sources, in order:
-  1. Iowa Environmental Mesonet (IEM) METAR archive: years of history,
-     used for calibration windows and older settlements.
-  2. aviationweather.gov (NOAA AWC): last ~15 days only, used to fill
-     any recent day IEM doesn't have yet.
+  1. aviationweather.gov (AWC): the official source; SPECI filtered out.
+     Only keeps ~15 days, so used for settlement and recent days.
+  2. Iowa Environmental Mesonet (IEM) archive: years of history, used for
+     older days (calibration windows). Caveat: IEM cannot tell SPECI
+     from routine half-hourly reports for EDDM (it strips the prefix),
+     so specials are included there -- a small upward bias on the rare
+     days a SPECI is warmer than every routine report.
 
 Run directly to compare both sources over the last few days:
     python3 station_obs.py
@@ -65,11 +72,15 @@ def fetch_iem(start: date, end: date):
         "year1": start.year, "month1": start.month, "day1": start.day,
         "year2": end_excl.year, "month2": end_excl.month, "day2": end_excl.day,
         "format": "onlycomma", "latlon": "no", "missing": "M",
+        # IEM labels EDDM's :20 half-hourly routine reports as type 4
+        # ("special"), so both types are needed to get all 48 per day.
         "direct": "no", "report_type": [3, 4],
     }
     r = requests.get("https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
                      params=params, headers=HEADERS, timeout=60)
     r.raise_for_status()
+    if not r.text.startswith("station,"):          # e.g. "Too many requests ... slow down"
+        raise RuntimeError(f"IEM returned no data: {r.text[:80]!r}")
     raw = pd.read_csv(io.StringIO(r.text), na_values=["M"])
     if raw.empty or "tmpc" not in raw.columns:
         return pd.DataFrame(columns=["local_dt", "temp_c"])
@@ -90,6 +101,8 @@ def fetch_awc_day(day: date):
                      params=params, headers=HEADERS, timeout=30)
     r.raise_for_status()
     rows = r.json() if r.text.strip() else []
+    # Polymarket rule: SPECI (special) reports don't count, only routine METARs.
+    rows = [x for x in rows if x.get("metarType") == "METAR"]
     if not rows:
         return pd.DataFrame(columns=["local_dt", "temp_c"])
     df = pd.DataFrame({
@@ -110,21 +123,28 @@ def fetch_daily_max(start, end, verbose=False):
         end = date.fromisoformat(end)
 
     result = {}
-    try:
-        result.update(_daily_max(fetch_iem(start, end)))
-    except Exception as e:
-        print(f"[station] IEM fetch failed ({start}..{end}): {e}")
-
+    # 1) AWC (official source, SPECI excluded) for days it still keeps.
     awc_horizon = date.today() - timedelta(days=14)
     d = max(start, awc_horizon)
     while d <= end:
-        key = d.strftime("%Y-%m-%d")
-        if key not in result:
-            try:
-                result.update(_daily_max(fetch_awc_day(d)))
-            except Exception as e:
-                print(f"[station] AWC fetch failed for {key}: {e}")
+        try:
+            result.update(_daily_max(fetch_awc_day(d)))
+        except Exception as e:
+            print(f"[station] AWC fetch failed for {d}: {e}")
         d += timedelta(days=1)
+
+    # 2) IEM archive for anything older or still missing.
+    missing = [start + timedelta(days=i) for i in range((end - start).days + 1)
+               if (start + timedelta(days=i)).strftime("%Y-%m-%d") not in result]
+    if missing:
+        try:
+            iem = _daily_max(fetch_iem(min(missing), max(missing)))
+            for m in missing:
+                k = m.strftime("%Y-%m-%d")
+                if k in iem:
+                    result[k] = iem[k]
+        except Exception as e:
+            print(f"[station] IEM fetch failed ({min(missing)}..{max(missing)}): {e}")
 
     if verbose:
         missing = (end - start).days + 1 - len(result)
