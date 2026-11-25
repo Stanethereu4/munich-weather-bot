@@ -74,33 +74,6 @@ retry_session = retry(cache_session, retries=5, backoff_factor=0.3)
 openmeteo = openmeteo_requests.Client(session=retry_session)
 
 
-def fetch_ground_truth_max(start_str, end_str):
-    """Actual observed daily max (daytime hours 10-19 local, matching
-    how Polymarket brackets typically define the observation window --
-    verify this against the real market rules text, don't just assume)."""
-    url = "https://archive-api.open-meteo.com/v1/archive"
-    params = {
-        "latitude": LATITUDE, "longitude": LONGITUDE,
-        "start_date": start_str, "end_date": end_str,
-        "hourly": "temperature_2m", "timezone": "Europe/Berlin",
-    }
-    resp = openmeteo.weather_api(url, params=params)[0]
-    hourly = resp.Hourly()
-    vals = hourly.Variables(0).ValuesAsNumpy()
-    ts = pd.to_datetime(np.arange(hourly.Time(), hourly.Time() + len(vals) * hourly.Interval(),
-                                   hourly.Interval()), unit="s", utc=True).tz_convert("Europe/Berlin")
-    df = pd.DataFrame({"dt": ts, "temp": vals})
-    df["date"] = df["dt"].dt.strftime("%Y-%m-%d")
-    df["hour"] = df["dt"].dt.hour
-
-    actual_max = {}
-    for date_str, group in df.groupby("date"):
-        daytime = group[(group["hour"] >= 10) & (group["hour"] <= 19)]
-        if len(daytime) > 0:
-            actual_max[date_str] = daytime["temp"].max()
-    return actual_max
-
-
 def fetch_previous_run_forecasts(start_str, end_str, horizon_day):
     """
     Fetches REAL archived forecasts at a fixed lead time via the
