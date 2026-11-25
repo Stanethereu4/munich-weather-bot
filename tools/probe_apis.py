@@ -265,17 +265,27 @@ if "single-runs" in probes:
     # C3: which models does the Single Runs API keep, from when, what shape?
     section("Open-Meteo Single Runs API (single-runs-api.open-meteo.com/v1/forecast)")
     URL = "https://single-runs-api.open-meteo.com/v1/forecast"
-    models = ["ecmwf_ifs025", "ecmwf_ifs", "icon_seamless", "icon_d2", "icon_eu", "icon_global",
-              "gfs_seamless", "gfs025", "ncep_gfs025", "gem_global", "meteofrance_seamless",
-              "meteofrance_arpege_europe", "meteofrance_arome_france_hd"]
-    shown = False
-    for run in ("2026-11-20T00:00", "2026-11-20T03:00", "2026-07-15T00:00", "2026-06-01T00:00",
+    models = ["ecmwf_ifs025", "icon_seamless", "gfs_seamless", "gem_global", "meteofrance_seamless",
+              "meteofrance_arome_france_hd", "gfs_global"]
+    shown = True
+
+    def get_retry(params, tries=5):
+        for k in range(tries):
+            try:
+                return requests.get(URL, params=params, headers=H, timeout=(10, 60))
+            except requests.RequestException as e:
+                print(f"    (retry {k + 1}: {type(e).__name__})"); time.sleep(5 * (k + 1))
+        return None
+
+    import time
+    for run in ("2026-11-20T03:00", "2026-07-15T00:00", "2026-07-15T06:00", "2026-06-01T00:00",
                 "2026-04-05T00:00", "2026-03-01T00:00"):
         print(f"\nrun={run}")
         for mdl in models:
-            r = requests.get(URL, params={"latitude": 48.3537, "longitude": 11.786, "run": run,
-                                          "models": mdl, "hourly": "temperature_2m",
-                                          "timezone": "UTC"}, headers=H, timeout=60)
+            r = get_retry({"latitude": 48.3537, "longitude": 11.786, "run": run,
+                           "models": mdl, "hourly": "temperature_2m", "timezone": "UTC"})
+            if r is None:
+                print(f"  {mdl:<30} gave up after retries"); continue
             try:
                 j = r.json()
             except Exception:
