@@ -20,3 +20,6 @@ for r in q("""SELECT target_date, bracket_label, ROUND(model_prob,3), market_pri
               FROM predictions ORDER BY id"""):
     print("  ", r)
 print("forecast_snapshots:", q("SELECT COUNT(*), COUNT(ts_utc) FROM forecast_snapshots"))
+
+print("blend_weights:", q("SELECT fit_date, market_kind, bias_c, n_days, window_start, window_end FROM blend_weights"))
+print("forecast rows with run tags:", q("SELECT market_kind, model_key, init_time FROM forecast_snapshots WHERE init_time IS NOT NULL ORDER BY id LIMIT 10"))
