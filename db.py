@@ -74,6 +74,13 @@ FALLBACK_SIGMAS = [(1, 0.77), (2, 0.99), (3, 1.14)]
 # placeholders and sqlite3-style cursor.description / fetchall(),
 # without needing psycopg2-specific code anywhere else.
 # ---------------------------------------------------------------------
+def _to_python(params):
+    """psycopg2 can't adapt numpy scalars (np.float64 gets rendered as
+    the SQL text 'np.float64(...)' -> 'schema "np" does not exist').
+    Convert anything with .item() to the plain Python equivalent."""
+    return tuple(p.item() if hasattr(p, "item") else p for p in params)
+
+
 class _PgCompatCursor:
     def __init__(self, real_cursor):
         self._cur = real_cursor
@@ -83,7 +90,15 @@ class _PgCompatCursor:
         if params is None:
             self._cur.execute(pg_query)
         else:
-            self._cur.execute(pg_query, params)
+            self._cur.execute(pg_query, _to_python(params))
+
+    def executemany(self, query, seq_of_params):
+        # One network round trip per page of rows instead of per row --
+        # matters a lot when GitHub's runner talks to a remote database.
+        from psycopg2.extras import execute_batch
+        pg_query = query.replace("?", "%s")
+        execute_batch(self._cur, pg_query,
+                      [_to_python(p) for p in seq_of_params], page_size=500)
 
     def fetchall(self):
         return self._cur.fetchall()

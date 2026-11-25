@@ -469,16 +469,13 @@ def log_orderbook_depth(event_slug, question, bids, asks):
     no extra API-call cost."""
     conn = get_connection()
     cur = conn.cursor()
-    for level in bids:
-        cur.execute("""
+    rows = [(event_slug, question, side, float(level.get("price", 0)), float(level.get("size", 0)))
+            for side, levels in (("bid", bids), ("ask", asks)) for level in levels]
+    if rows:
+        cur.executemany("""
             INSERT INTO orderbook_depth (event_slug, market_question, side, price_level, size)
             VALUES (?, ?, ?, ?, ?)
-        """, (event_slug, question, "bid", float(level.get("price", 0)), float(level.get("size", 0))))
-    for level in asks:
-        cur.execute("""
-            INSERT INTO orderbook_depth (event_slug, market_question, side, price_level, size)
-            VALUES (?, ?, ?, ?, ?)
-        """, (event_slug, question, "ask", float(level.get("price", 0)), float(level.get("size", 0))))
+        """, rows)
     conn.commit()
     conn.close()
 
