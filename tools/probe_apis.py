@@ -300,6 +300,44 @@ if "single-runs" in probes:
             else:
                 print(f"  {mdl:<30} {r.status_code} {str(j.get('reason', r.text))[:110]}")
 
+if "ens-mean" in probes:
+    # Is there a usable HISTORY of ensemble mean + spread, and is it per run?
+    import time
+    section("Ensemble mean/spread history (ensemble-api) and per-run access (single-runs-api)")
+    names = ["dwd_icon_eps_ensemble_mean_seamless", "ecmwf_ifs025_ensemble_mean", "ecmwf_ifs_ensemble_mean",
+             "ncep_gefs_ensemble_mean_seamless", "ecmwf_aifs025_ensemble_mean"]
+
+    def get(url, params, tries=4):
+        for k in range(tries):
+            try:
+                return requests.get(url, params=params, headers=H, timeout=(10, 40))
+            except requests.RequestException as e:
+                time.sleep(4 * (k + 1))
+        return None
+
+    for name in names:
+        base = {"latitude": 48.3537, "longitude": 11.786, "models": name,
+                "hourly": "temperature_2m,temperature_2m_spread", "timezone": "UTC"}
+        r = get("https://ensemble-api.open-meteo.com/v1/ensemble", {**base, "start_date": "2026-07-15", "end_date": "2026-07-15"})
+        if r is None:
+            print(f"{name}: ensemble-api no response"); continue
+        j = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        h = j.get("hourly", {})
+        print(f"{name}\n  ensemble-api 2026-07-15: {r.status_code} keys={list(h.keys())} "
+              f"sample mean={h.get('temperature_2m', [None]*13)[12]} spread={h.get('temperature_2m_spread', [None]*13)[12]} "
+              f"{'' if r.status_code == 200 else j.get('reason', '')[:100]}")
+        for run in ("2026-07-14T00:00", "2026-07-15T00:00"):
+            r = get("https://single-runs-api.open-meteo.com/v1/forecast", {**base, "run": run})
+            if r is None:
+                print(f"  single-runs run={run}: no response"); continue
+            j = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            h = j.get("hourly", {})
+            t = h.get("time", [])
+            idx = t.index("2026-07-15T12:00") if "2026-07-15T12:00" in t else None
+            print(f"  single-runs run={run}: {r.status_code} "
+                  + (f"15 Jul 12z mean={h['temperature_2m'][idx]} spread={h.get('temperature_2m_spread', [None]*999)[idx]}"
+                     if idx is not None else str(j.get('reason', ''))[:100]))
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
