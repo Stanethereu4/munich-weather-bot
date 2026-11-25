@@ -13,6 +13,7 @@ from retry_requests import retry
 
 from db import init_db, get_connection, latest_leadtime_sigma
 from station_obs import fetch_daily_max as fetch_station_daily_max
+from daymax import hourly_times_local, daily_max_by_date, daily_max_for
 from kelly_multi import Candidate, solve_joint_kelly
 
 # --- CONFIGURATION ---
@@ -140,14 +141,8 @@ def fetch_live_ensemble_forecast(target_date_str):
     for model_key, response in zip(MODELS.keys(), responses):
         hourly = response.Hourly()
         vals = hourly.Variables(0).ValuesAsNumpy()
-        times = hourly.Time()
-        step = hourly.Interval()
-        ts_utc = pd.to_datetime(np.arange(times, times + len(vals) * step, step), unit="s", utc=True)
-        ts_local = ts_utc.tz_convert("Europe/Berlin")
-
-        df = pd.DataFrame({"dt": ts_local, "temp": vals})
-        daytime = df[(df["dt"].dt.hour >= 10) & (df["dt"].dt.hour <= 19)]
-        m = daytime["temp"].max()
+        # Full local day (00:00-23:59), same as the market and the station truth.
+        m = daily_max_for(target_date_str, hourly_times_local(hourly, len(vals)), vals)
         live_maxes.append(m)
         per_model_max[model_key] = float(m)
 
@@ -250,22 +245,15 @@ def fetch_and_log_all_ensemble_members(target_date_str):
 
     for model_key, response in zip(ENSEMBLE_MODELS.keys(), responses):
         hourly = response.Hourly()
-        times = hourly.Time()
-        step = hourly.Interval()
         num_members = hourly.VariablesLength()
         model_logged = 0
 
         for i in range(num_members):
             vals = hourly.Variables(i).ValuesAsNumpy()
-            ts_utc = pd.to_datetime(np.arange(times, times + len(vals) * step, step),
-                                     unit="s", utc=True)
-            ts_local = ts_utc.tz_convert("Europe/Berlin")
-            df = pd.DataFrame({"dt": ts_local, "temp": vals})
-            daytime = df[(df["dt"].dt.hour >= 10) & (df["dt"].dt.hour <= 19)]
-            valid = daytime["temp"].dropna()
-            if len(valid) == 0:
+            # Full local day; NaN if the member doesn't cover enough of it.
+            member_max = daily_max_for(target_date_str, hourly_times_local(hourly, len(vals)), vals)
+            if np.isnan(member_max):
                 continue
-            member_max = float(valid.max())
             cur.execute("""
                 INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c)
                 VALUES (?, ?, ?)
@@ -311,14 +299,9 @@ def fetch_calibration_data(target_date_str):
     for model_key, response in zip(MODELS.keys(), resp_m):
         hourly = response.Hourly()
         vals = hourly.Variables(0).ValuesAsNumpy()
-        ts = pd.to_datetime(np.arange(hourly.Time(), hourly.Time() + len(vals) * hourly.Interval(),
-                                       hourly.Interval()), unit="s", utc=True).tz_convert("Europe/Berlin")
-        df_mod = pd.DataFrame({"dt": ts, "temp": vals})
-        df_mod["date"] = df_mod["dt"].dt.strftime("%Y-%m-%d")
-        for d, grp in df_mod.groupby("date"):
-            daytime = grp[(grp["dt"].dt.hour >= 10) & (grp["dt"].dt.hour <= 19)]
-            if len(daytime) > 0:
-                model_daily_max[model_key][d] = daytime["temp"].max()
+        # Full local day per date; incomplete days (NaN) are left out.
+        per_day = daily_max_by_date(hourly_times_local(hourly, len(vals)), vals)
+        model_daily_max[model_key] = {d: v for d, v in per_day.items() if not np.isnan(v)}
 
     valid_dates = [d for d in sorted(actuals.keys()) if all(d in model_daily_max[m] for m in MODELS.keys())]
     y_tr = np.array([actuals[d] for d in valid_dates])
@@ -651,6 +634,12 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
     live_X, per_model_max = fetch_live_ensemble_forecast(target_date_str)
     log_forecast_snapshot(target_date_str, per_model_max)  # every run here; cron this at 3-6h cadence, not every scan
     fetch_and_log_all_ensemble_members(target_date_str)     # raw member logging -- additive, doesn't feed live prediction
+
+    if np.isnan(live_X).any():
+        missing = [m for m, v in per_model_max.items() if np.isnan(v)]
+        print(f"[!] SKIPPING {target_date_str}: no full-day forecast from {missing} "
+              f"(target day not fully inside their forecast range yet).")
+        return
 
     calibrated_mean = np.dot(live_X, opt_w) + opt_b
     sigma = get_horizon_sigma(lead_time_hours)  # NOW REAL, from leadtime_calibration

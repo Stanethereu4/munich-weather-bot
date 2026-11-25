@@ -45,6 +45,7 @@ from retry_requests import retry
 
 from db import init_db, get_connection
 from station_obs import fetch_daily_max as fetch_station_daily_max
+from daymax import hourly_times_local, daily_max_by_date
 
 # --- CONFIGURATION ---
 LATITUDE = 48.3537
@@ -127,25 +128,14 @@ def fetch_previous_run_forecasts(start_str, end_str, horizon_day):
 
 
 def compute_model_daily_max_from_previous_run(responses, var_index=0):
-    """Reduces the previous-run hourly series to a daytime daily max per model."""
+    """Reduces the previous-run hourly series to a full-day max per model."""
     model_daily_max = {m: {} for m in MODELS.keys()}
     for model_key, response in zip(MODELS.keys(), responses):
         hourly = response.Hourly()
         vals = hourly.Variables(var_index).ValuesAsNumpy()
-        times = hourly.Time()
-        step = hourly.Interval()
-        ts_utc = pd.to_datetime(np.arange(times, times + len(vals) * step, step), unit="s", utc=True)
-        ts_local = ts_utc.tz_convert("Europe/Berlin")
-
-        df = pd.DataFrame({"dt": ts_local, "temp": vals})
-        df["date"] = df["dt"].dt.strftime("%Y-%m-%d")
-        df["hour"] = df["dt"].dt.hour
-
-        for date_str, group in df.groupby("date"):
-            daytime = group[(group["hour"] >= 10) & (group["hour"] <= 19)]
-            valid = daytime["temp"].dropna()
-            if len(valid) > 0:
-                model_daily_max[model_key][date_str] = valid.max()
+        # Full local day (00:00-23:59), same as the market and station truth.
+        per_day = daily_max_by_date(hourly_times_local(hourly, len(vals)), vals)
+        model_daily_max[model_key] = {d: v for d, v in per_day.items() if not np.isnan(v)}
     return model_daily_max
 
 
