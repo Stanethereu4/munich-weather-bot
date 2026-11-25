@@ -44,8 +44,8 @@ import requests_cache
 from retry_requests import retry
 
 from db import init_db, get_connection
-from station_obs import fetch_daily_max as fetch_station_daily_max
-from daymax import hourly_times_local, daily_max_by_date
+from station_obs import fetch_daily_extreme as fetch_station_daily_extreme
+from daymax import hourly_times_local, daily_extreme_by_date
 from http_session import TimeoutCachedSession
 
 # --- CONFIGURATION ---
@@ -101,14 +101,15 @@ def fetch_previous_run_forecasts(start_str, end_str, horizon_day):
     return openmeteo.weather_api(url, params=params)
 
 
-def compute_model_daily_max_from_previous_run(responses, var_index=0):
-    """Reduces the previous-run hourly series to a full-day max per model."""
+def compute_model_daily_max_from_previous_run(responses, var_index=0, kind="high"):
+    """Reduces the previous-run hourly series to a full-day max (kind='high')
+    or min ('low') per model."""
     model_daily_max = {m: {} for m in MODELS.keys()}
     for model_key, response in zip(MODELS.keys(), responses):
         hourly = response.Hourly()
         vals = hourly.Variables(var_index).ValuesAsNumpy()
         # Full local day (00:00-23:59), same as the market and station truth.
-        per_day = daily_max_by_date(hourly_times_local(hourly, len(vals)), vals)
+        per_day = daily_extreme_by_date(hourly_times_local(hourly, len(vals)), vals, kind)
         model_daily_max[model_key] = {d: v for d, v in per_day.items() if not np.isnan(v)}
     return model_daily_max
 
@@ -130,7 +131,9 @@ def fit_slsqp_ensemble(X, y_true):
     return res.x[:num_models], res.x[num_models]
 
 
-def run_real_leadtime_measurement():
+def run_real_leadtime_measurement(kinds=("high", "low")):
+    """Measures forecast error per horizon for each market kind ('high' =
+    daily max, 'low' = daily min) and writes one set of rows per kind."""
     end_date = datetime.now() - timedelta(days=3)  # leave margin for API archival lag
     start_date = end_date - timedelta(days=DAYS_TO_EVALUATE)
     start_str, end_str = start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
@@ -139,68 +142,72 @@ def run_real_leadtime_measurement():
     print("(Previous Runs API archive starts Jan 2024 for most models -- if your "
           "DAYS_TO_EVALUATE window predates that, results will be shorter than requested.)\n")
 
-    # Ground truth = EDDM station (METAR) daily max in whole °C -- what
-    # Polymarket resolves on -- not the Open-Meteo grid. Sigma measured
-    # against the grid understates the real error versus resolution.
-    actuals = fetch_station_daily_max(start_str, end_str, verbose=True)
+    # Ground truth = EDDM station (routine METAR) daily max / min in whole
+    # °C -- what Polymarket resolves on -- not the Open-Meteo grid.
+    actuals_by_kind = {k: fetch_station_daily_extreme(start_str, end_str, k, verbose=True) for k in kinds}
 
-    print(f"{'Horizon':<12} | {'Ensemble MAE':<15} | {'Measured Sigma':<16} | {'ECMWF Wgt':<10} | {'N days':<8}")
-    print("-" * 75)
+    # One download per horizon; both kinds are computed from the same data.
+    responses_by_horizon = {h: fetch_previous_run_forecasts(start_str, end_str, h) for h in HORIZON_DAYS}
 
     results = []
-    for horizon_day in HORIZON_DAYS:
-        responses = fetch_previous_run_forecasts(start_str, end_str, horizon_day)
-        model_daily_max = compute_model_daily_max_from_previous_run(responses)
+    for kind in kinds:
+        actuals = actuals_by_kind[kind]
+        print(f"\n=== {'HIGHEST (daily max)' if kind == 'high' else 'LOWEST (daily min)'} ===")
+        print(f"{'Horizon':<12} | {'Ensemble MAE':<15} | {'Measured Sigma':<16} | {'ECMWF Wgt':<10} | {'N days':<8}")
+        print("-" * 75)
+        for horizon_day in HORIZON_DAYS:
+            responses = responses_by_horizon[horizon_day]
+            model_daily_max = compute_model_daily_max_from_previous_run(responses, kind=kind)
 
-        # Diagnostic: show per-model coverage BEFORE intersecting, so a
-        # single short-archive model doesn't silently zero out the
-        # whole horizon without explanation (this is what happened to
-        # day 4 in the first real run -- one model's Previous Runs
-        # archive likely doesn't extend that far).
-        coverage = {m: len(model_daily_max[m]) for m in MODELS.keys()}
-        print(f"  [coverage] day{horizon_day} per-model day counts: {coverage}")
+            # Diagnostic: show per-model coverage BEFORE intersecting, so a
+            # single short-archive model doesn't silently zero out the
+            # whole horizon without explanation (this is what happened to
+            # day 4 in the first real run -- one model's Previous Runs
+            # archive likely doesn't extend that far).
+            coverage = {m: len(model_daily_max[m]) for m in MODELS.keys()}
+            print(f"  [coverage] day{horizon_day} per-model day counts: {coverage}")
 
-        MIN_DAYS_PER_MODEL = 30
-        usable_models = [m for m, n in coverage.items() if n >= MIN_DAYS_PER_MODEL]
-        dropped_models = [m for m in MODELS.keys() if m not in usable_models]
-        if dropped_models:
-            print(f"  [coverage] dropping {dropped_models} for day{horizon_day} "
-                  f"(< {MIN_DAYS_PER_MODEL} days available) -- refitting on remaining "
-                  f"{len(usable_models)} model(s) instead of failing the whole horizon.")
+            MIN_DAYS_PER_MODEL = 30
+            usable_models = [m for m, n in coverage.items() if n >= MIN_DAYS_PER_MODEL]
+            dropped_models = [m for m in MODELS.keys() if m not in usable_models]
+            if dropped_models:
+                print(f"  [coverage] dropping {dropped_models} for day{horizon_day} "
+                      f"(< {MIN_DAYS_PER_MODEL} days available) -- refitting on remaining "
+                      f"{len(usable_models)} model(s) instead of failing the whole horizon.")
 
-        if len(usable_models) < 2:
-            print(f"{horizon_day} day(s)   | fewer than 2 usable models after coverage "
-                  f"filtering -- skipping")
-            continue
+            if len(usable_models) < 2:
+                print(f"{horizon_day} day(s)   | fewer than 2 usable models after coverage "
+                      f"filtering -- skipping")
+                continue
 
-        valid_dates = [d for d in sorted(actuals.keys())
-                       if all(d in model_daily_max[m] for m in usable_models)]
-        if len(valid_dates) < 30:
-            print(f"{horizon_day} day(s)   | insufficient overlapping data "
-                  f"({len(valid_dates)} days) -- skipping")
-            continue
+            valid_dates = [d for d in sorted(actuals.keys())
+                           if all(d in model_daily_max[m] for m in usable_models)]
+            if len(valid_dates) < 30:
+                print(f"{horizon_day} day(s)   | insufficient overlapping data "
+                      f"({len(valid_dates)} days) -- skipping")
+                continue
 
-        y_true = np.array([actuals[d] for d in valid_dates])
-        X = np.column_stack([[model_daily_max[m][d] for d in valid_dates] for m in usable_models])
+            y_true = np.array([actuals[d] for d in valid_dates])
+            X = np.column_stack([[model_daily_max[m][d] for d in valid_dates] for m in usable_models])
 
-        opt_w, opt_b = fit_slsqp_ensemble(X, y_true)
-        pred = np.dot(X, opt_w) + opt_b
-        mae = float(np.mean(np.abs(pred - y_true)))
-        sigma = mae * 1.2533  # MAE -> sigma conversion for a normal distribution, same as before
+            opt_w, opt_b = fit_slsqp_ensemble(X, y_true)
+            pred = np.dot(X, opt_w) + opt_b
+            mae = float(np.mean(np.abs(pred - y_true)))
+            sigma = mae * 1.2533  # MAE -> sigma conversion for a normal distribution, same as before
 
-        # ecmwf_weight is only meaningful if ECMWF was among the usable
-        # models for this horizon -- report None otherwise rather than
-        # silently mislabeling a different model's weight as ECMWF's.
-        ecmwf_idx = usable_models.index("ecmwf_ifs025") if "ecmwf_ifs025" in usable_models else None
-        ecmwf_w = float(opt_w[ecmwf_idx]) if ecmwf_idx is not None else None
+            # ecmwf_weight is only meaningful if ECMWF was among the usable
+            # models for this horizon -- report None otherwise rather than
+            # silently mislabeling a different model's weight as ECMWF's.
+            ecmwf_idx = usable_models.index("ecmwf_ifs025") if "ecmwf_ifs025" in usable_models else None
+            ecmwf_w = float(opt_w[ecmwf_idx]) if ecmwf_idx is not None else None
 
-        results.append({
-            "horizon_days": horizon_day, "mae_c": mae, "sigma_c": sigma,
-            "n_days_evaluated": len(valid_dates), "ecmwf_weight": ecmwf_w,
-        })
-        ecmwf_w_str = f"{ecmwf_w*100:.1f}%" if ecmwf_w is not None else "N/A (dropped)"
-        print(f"{horizon_day} day(s)   | {mae:<15.3f} | {sigma:<16.3f} | "
-              f"{ecmwf_w_str:<10} | {len(valid_dates):<8}")
+            results.append({
+                "horizon_days": horizon_day, "mae_c": mae, "sigma_c": sigma,
+                "n_days_evaluated": len(valid_dates), "ecmwf_weight": ecmwf_w, "kind": kind,
+            })
+            ecmwf_w_str = f"{ecmwf_w*100:.1f}%" if ecmwf_w is not None else "N/A (dropped)"
+            print(f"{horizon_day} day(s)   | {mae:<15.3f} | {sigma:<16.3f} | "
+                  f"{ecmwf_w_str:<10} | {len(valid_dates):<8}")
 
     if not results:
         print("\nNo horizons produced enough data -- nothing written to DB.")
@@ -211,9 +218,11 @@ def run_real_leadtime_measurement():
     cur = conn.cursor()
     for r in results:
         cur.execute("""
-            INSERT INTO leadtime_calibration (horizon_days, mae_c, sigma_c, n_days_evaluated, ecmwf_weight)
-            VALUES (?, ?, ?, ?, ?)
-        """, (r["horizon_days"], r["mae_c"], r["sigma_c"], r["n_days_evaluated"], r["ecmwf_weight"]))
+            INSERT INTO leadtime_calibration (horizon_days, mae_c, sigma_c, n_days_evaluated, ecmwf_weight,
+                                              market_kind)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (r["horizon_days"], r["mae_c"], r["sigma_c"], r["n_days_evaluated"], r["ecmwf_weight"],
+              r["kind"]))
     conn.commit()
     conn.close()
     print(f"\nWrote {len(results)} REAL measured horizon rows to leadtime_calibration.")

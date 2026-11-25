@@ -142,6 +142,7 @@ jobs:
       - name: Dry run on throwaway SQLite (no DATABASE_URL -> production DB untouched)
         if: inputs.task == 'dry-run'
         run: |
+          python3 Lead_Time_Sensitivity.py
           python3 munich_bot.py --prices-only
           python3 munich_bot.py
           python3 station_obs.py

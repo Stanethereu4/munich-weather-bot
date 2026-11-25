@@ -3,6 +3,10 @@ import sqlite3
 
 c = sqlite3.connect("weather_bot.db")
 q = lambda sql: c.execute(sql).fetchall()
+print("by kind -- price rows:", q("SELECT market_kind, COUNT(*), COUNT(DISTINCT event_slug) FROM price_snapshots GROUP BY market_kind"))
+print("by kind -- predictions:", q("SELECT market_kind, COUNT(*) FROM predictions GROUP BY market_kind"))
+print("by kind -- forecast rows:", q("SELECT market_kind, COUNT(*) FROM forecast_snapshots GROUP BY market_kind"))
+print("calibration:", q("SELECT market_kind, horizon_days, ROUND(sigma_c, 3) FROM leadtime_calibration ORDER BY market_kind, horizon_days"))
 print("price_snapshots:", q("SELECT COUNT(*), COUNT(DISTINCT snapshot_id), COUNT(token_id), COUNT(best_ask) FROM price_snapshots"),
       "(rows, snapshots, rows with token, rows with best_ask)")
 print("units check (all must be 0-1):", q("SELECT MIN(gamma_price), MAX(gamma_price), MIN(mid), MAX(mid) FROM price_snapshots"))
