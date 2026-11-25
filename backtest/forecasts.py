@@ -17,8 +17,9 @@ Open-Meteo's Single Runs API:
 
 Output: backtest_data/forecasts/runs_<YYYY-MM>.parquet, one row per
 (model, init_time, valid hour):  model, init (unix s UTC), t (unix s UTC), temp
-A month file is written only once all its runs are downloaded; existing
-complete months are skipped, so the script can be re-run to continue.
+Each month file is saved with whatever was downloaded; a re-run fetches only
+the runs still missing (runs the API reports as not archived are listed in
+not_archived.csv and skipped).
 """
 
 import os
@@ -112,36 +113,47 @@ def main():
     for i in inits:
         by_month.setdefault(i.strftime("%Y-%m"), []).append(i)
 
+    # Runs the API said are not archived (HTTP 400): remembered so they are
+    # not asked again on every re-run.
+    na_path = os.path.join(OUT, "not_archived.csv")
+    not_archived = set(pd.read_csv(na_path)["init"]) if os.path.exists(na_path) else set()
+
     t_start = time.time()
     for month, month_inits in sorted(by_month.items()):
         path = os.path.join(OUT, f"runs_{month}.parquet")
-        if os.path.exists(path) and len(pd.read_parquet(path, columns=["init"])["init"].unique()) >= len(month_inits) - 2:
-            continue                     # complete (a couple of unarchived runs are tolerated)
+        have = pd.read_parquet(path) if os.path.exists(path) else pd.DataFrame(
+            columns=["model", "init", "t", "temp"])
+        # a run counts as done when all blend models are in, or it was marked not archived
+        per_init = have.groupby("init")["model"].nunique() if len(have) else pd.Series(dtype=int)
+        todo = [i for i in month_inits
+                if per_init.get(int(i.timestamp()), 0) < len(MODELS) and int(i.timestamp()) not in not_archived]
+        if not todo:
+            continue
         if (time.time() - t_start) / 60 > MAX_MINUTES:
             print("time budget reached -- re-run to continue"); break
 
-        parts, missing, failed = [], [], []
+        parts, failed = [have], []
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {pool.submit(fetch_run, i): i for i in month_inits}
+            futures = {pool.submit(fetch_run, i): i for i in todo}
             for f in as_completed(futures):
                 df, note = f.result()
-                if df is None:
-                    failed.append((futures[f], note))
+                init = futures[f]
+                if df is None:                       # network kept failing: retry next time
+                    failed.append(init)
                     continue
                 if not df.empty:
                     parts.append(df)
-                if note:
-                    missing.append((futures[f], note))
-        if failed:
-            print(f"{month}: {len(failed)} run(s) failed after retries -- month not saved, re-run")
-            continue
-        out = pd.concat(parts).astype({"init": "int64", "t": "int64", "temp": "float32"})
-        out.to_parquet(path, compression="zstd", index=False)
+                if note and df["model"].nunique() < len(MODELS):
+                    not_archived.add(int(init.timestamp()))   # some model simply lacks this run
+
+        out = (pd.concat(parts).astype({"init": "int64", "t": "int64", "temp": "float32"})
+               .drop_duplicates(["model", "init", "t"]))
+        out.to_parquet(path, compression="zstd", index=False)     # save whatever we have
+        pd.DataFrame({"init": sorted(not_archived)}).to_csv(na_path, index=False)
         cover = out.groupby("model")["init"].nunique().to_dict()
-        print(f"{month}: {len(month_inits)} runs, saved; runs per model {cover}; "
-              f"runs with a model not archived: {len(missing)} ({(time.time() - t_start) / 60:.0f} min)")
-        for i, err in missing[:3]:
-            print(f"    e.g. {i:%Y-%m-%d %H}z: {err}")
+        print(f"{month}: {len(month_inits)} runs | fetched now {len(todo) - len(failed)}, "
+              f"still failing {len(failed)} (re-run to retry) | runs per model {cover} "
+              f"({(time.time() - t_start) / 60:.0f} min)")
 
 
 if __name__ == "__main__":
