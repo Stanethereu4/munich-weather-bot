@@ -18,6 +18,7 @@ from timeutil import utc_now_iso, berlin_now, berlin_today, hours_until_local_da
 from kelly_multi import Candidate, solve_joint_kelly
 from http_session import TimeoutSession, TimeoutCachedSession
 from om_meta import current_runs
+from blendfit import fit_blend
 
 # --- CONFIGURATION ---
 LATITUDE = 48.3537   # Munich Airport (EDDM)
@@ -893,25 +894,6 @@ def run_scanner_for_all_open_events():
         except Exception as e:
             print(f"[full-run] {event['event_slug']} FAILED, skipping to the next market: "
                   f"{type(e).__name__}: {str(e)[:200]}")
-
-
-def fit_blend(X_tr, y_tr):
-    """
-    Finds the model weights (each 0-1, summing to 1) and a bias (-2..+2 °C)
-    that make  blend = sum(weight_i * forecast_i) + bias  miss the station
-    value by as little as possible (mean squared error) over the window.
-    """
-    num_models = X_tr.shape[1]
-    constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w[:num_models]) - 1.0})
-    bounds = [(0.0, 1.0)] * num_models + [(-2.0, 2.0)]
-    initial_guess = [1.0 / num_models] * num_models + [0.0]
-
-    def loss_func(params):
-        w, b = params[:num_models], params[num_models]
-        return np.mean((y_tr - (np.dot(X_tr, w) + b)) ** 2)
-
-    res = minimize(loss_func, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
-    return res.x[:num_models], float(res.x[num_models])
 
 
 def get_daily_blend(kind):
