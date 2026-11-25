@@ -52,6 +52,16 @@ def section(title):
 
 
 probes = sys.argv[1:] or ["gamma-open", "gamma-resolved", "clob-book"]
+
+if "gamma-rules" in probes:
+    d = date.today() - timedelta(days=3)
+    ev = gamma_event(d)
+    section(f"GAMMA rules text (description) for {slug_for(d)}")
+    print(ev.get("description"))
+    print("\nresolutionSource:", ev.get("resolutionSource"))
+    m = ev["markets"][0]
+    print("market keys containing 'uma'/'resol':",
+          {k: m.get(k) for k in m if "uma" in k.lower() or "resol" in k.lower()})
 today = date.today()
 
 if "gamma-open" in probes or "clob-book" in probes:
