@@ -1,21 +1,21 @@
 name: Munich Weather Bot - Scheduled Logging
 
-# Schedules:
-#   - price snapshots every 15 minutes
-#   - full model run + settlement every 4 hours
-#   - lead-time calibration once a week (Monday 03:17 UTC)
-#
-# GitHub's cron is best-effort: in practice it skips most 15-minute runs.
-# For reliable 15-minute snapshots, trigger this workflow from outside
-# (e.g. cron-job.org calling the workflow_dispatch API with task=logging).
+# How logging stays continuous:
+#   GitHub's cron is best-effort and skips most 15-minute triggers, so
+#   instead of one short run per snapshot, the `logger` job runs for
+#   ~5h50m and loops internally: a price snapshot every quarter hour,
+#   a full model run + settlement every 4 hours. An hourly trigger
+#   queues the next logger (concurrency group, max one waiting), so
+#   when one finishes the next starts right away. Even if GitHub drops
+#   most hourly triggers, one getting through every ~6h is enough.
+#   (Repo is public -> Actions minutes are free.)
 #
 # GitHub auto-disables scheduled workflows after 60 days without a push
 # to the repo. Check the Actions tab occasionally.
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # price snapshots
-    - cron: "0 */4 * * *"    # full model run + settlement
+    - cron: "7 * * * *"      # hourly: keep a logger running / queued
     - cron: "17 3 * * 1"     # weekly lead-time calibration
   workflow_dispatch:
     inputs:
@@ -24,19 +24,21 @@ on:
         type: choice
         default: logging
         options:
-          - logging          # price snapshot + full run (same as the schedules)
-          - prices-only      # price snapshot only (use this for an external 15-min trigger)
+          - logging          # start the long-running logger loop
+          - once             # one price snapshot + one full run, then stop (testing)
           - calibrate        # measure forecast error per horizon -> leadtime_calibration
           - check-station    # compare EDDM station sources for the last 7 days (read-only)
 
 jobs:
-  prices-only:
+  logger:
     if: >-
-      github.event.schedule == '*/15 * * * *' ||
-      (github.event_name == 'workflow_dispatch' &&
-       (inputs.task == 'logging' || inputs.task == 'prices-only'))
+      github.event.schedule == '7 * * * *' ||
+      (github.event_name == 'workflow_dispatch' && inputs.task == 'logging')
+    concurrency:
+      group: logger
+      cancel-in-progress: false
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -45,26 +47,43 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run price snapshot
+      - name: Logging loop (prices every 15 min, full run every 4 h)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          stop_at=$(( $(date +%s) + 5*3600 + 40*60 ))
+          last_full=0
+          while [ "$(date +%s)" -lt "$stop_at" ]; do
+            now=$(date +%s)
+            echo "::group::$(date -u +%FT%TZ) price snapshot"
+            python3 munich_bot.py --prices-only || echo "[loop] price snapshot failed"
+            echo "::endgroup::"
+            if [ $(( now - last_full )) -ge $(( 4*3600 - 300 )) ]; then
+              echo "::group::$(date -u +%FT%TZ) full model run + settlement"
+              python3 munich_bot.py || echo "[loop] full run failed"
+              echo "::endgroup::"
+              last_full=$now
+            fi
+            sleep $(( 900 - $(date +%s) % 900 ))   # wake at the next quarter hour
+          done
+
+  once:
+    if: github.event_name == 'workflow_dispatch' && inputs.task == 'once'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Price snapshot
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python3 munich_bot.py --prices-only
-
-  full-run:
-    if: >-
-      github.event.schedule == '0 */4 * * *' ||
-      (github.event_name == 'workflow_dispatch' && inputs.task == 'logging')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-          cache: pip
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run full model scan + settlement
+      - name: Full model run + settlement
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python3 munich_bot.py
