@@ -242,7 +242,7 @@ if "om-meta" in probes:
     # Candidate per-model status files behind open-meteo.com/en/docs/model-updates.
     section("Open-Meteo per-model metadata (static/meta.json)")
     from datetime import datetime, timezone
-    candidates = ["ecmwf_ifs025", "ecmwf_ifs", "dwd_icon", "dwd_icon_eu", "dwd_icon_d2",
+    candidates = ["ecmwf_ifs025", "ecmwf_ifs", "dwd_icon", "dwd_icon_eu", "dwd_icon_d2", "cmc_gem_global", "gem_global", "cmc_gem_rdps", "cmc_gem_hrdps", "cmc_gem_gdps_15km", "meteofrance_arpege_world", "meteofrance_arpege_world025",
                   "ncep_gfs025", "ncep_gfs013", "cmc_gem_gdps", "meteofrance_arpege_europe",
                   "meteofrance_arome_france", "meteofrance_arome_france_hd"]
     first = True
