@@ -108,6 +108,68 @@ if "gamma-lowest" in probes:
         print("brackets:", [m.get("groupItemTitle") for m in found.get("markets", [])])
         print("volume:", found.get("volume"), "| liquidity:", found.get("liquidity"))
 
+if "price-history" in probes:
+    # C2: which public source gives the finest historical prices for a
+    # RESOLVED market? One resolved high market (and its low twin), the
+    # most-traded bracket, three candidate sources.
+    import statistics
+    from datetime import datetime, timezone
+    d = date.today() - timedelta(days=3)
+    for kind_slug in ("highest", "lowest"):
+        slug = slug_for(d).replace("highest", kind_slug)
+        ev = requests.get(f"{GAMMA}/events", params={"slug": slug}, headers=H, timeout=20).json()[0]
+        m = max(ev["markets"], key=lambda m: float(m.get("volumeNum") or m.get("volume") or 0))
+        yes_tok = json.loads(m["clobTokenIds"])[0]
+        cond = m.get("conditionId")
+        section(f"{slug} | bracket {m.get('groupItemTitle')} | volume {m.get('volume')} | conditionId {cond[:12]}...")
+        print("market start:", m.get("startDate"), "| end:", m.get("endDate"), "| closedTime:", m.get("closedTime"))
+
+        # 1) Data API trades feed (every fill)
+        trades, offset = [], 0
+        while offset < 5000:
+            r = requests.get("https://data-api.polymarket.com/trades",
+                             params={"market": cond, "limit": 500, "offset": offset}, headers=H, timeout=30)
+            if r.status_code != 200:
+                print("trades:", r.status_code, r.text[:200]); break
+            batch = r.json()
+            if not batch: break
+            trades += batch; offset += len(batch)
+            if len(batch) < 500: break
+        print(f"\n[1] data-api /trades?market=<conditionId>: {len(trades)} trades (all brackets of this market? see 'asset')")
+        if trades:
+            shape(trades[0])
+            mine = sorted([t for t in trades if str(t.get("asset")) == yes_tok], key=lambda t: t["timestamp"])
+            print(f"   trades on this bracket's YES token: {len(mine)}")
+            if len(mine) > 1:
+                ts = [int(t["timestamp"]) for t in mine]
+                gaps = [(b - a) / 60 for a, b in zip(ts, ts[1:])]
+                print(f"   first {datetime.fromtimestamp(ts[0], timezone.utc):%Y-%m-%d %H:%M} | last {datetime.fromtimestamp(ts[-1], timezone.utc):%Y-%m-%d %H:%M} UTC")
+                print(f"   gap between trades (min): median {statistics.median(gaps):.1f} | 90th pct {sorted(gaps)[int(len(gaps)*.9)]:.0f} | max {max(gaps):.0f}")
+                hours = {datetime.fromtimestamp(t, timezone.utc).strftime('%m-%d %H') for t in ts}
+                print(f"   distinct clock-hours with >=1 trade: {len(hours)}")
+
+        # 2) CLOB prices-history, finest fidelity, whole life of the market
+        for params in ({"market": yes_tok, "interval": "max", "fidelity": 1},
+                       {"market": yes_tok, "startTs": int(datetime.fromisoformat(m["startDate"].replace("Z", "+00:00")).timestamp()),
+                        "endTs": int(datetime.fromisoformat(m["startDate"].replace("Z", "+00:00")).timestamp()) + 4 * 86400,
+                        "fidelity": 1}):
+            r = requests.get(f"{CLOB}/prices-history", params=params, headers=H, timeout=30)
+            hist = r.json().get("history", []) if r.status_code == 200 else []
+            label = "interval=max" if "interval" in params else "startTs/endTs"
+            if len(hist) > 1:
+                gaps = [(b["t"] - a["t"]) / 60 for a, b in zip(hist, hist[1:])]
+                print(f"\n[2] clob /prices-history ({label}, fidelity=1): {len(hist)} points, "
+                      f"median spacing {statistics.median(gaps):.0f} min, sample {hist[:2]}")
+            else:
+                print(f"\n[2] clob /prices-history ({label}): status {r.status_code}, {len(hist)} points, {r.text[:150]}")
+
+        # 3) 'v2 prices-history with bucket_seconds' -- try likely URLs
+        for url in ("https://data-api.polymarket.com/v2/prices-history",
+                    "https://data-api.polymarket.com/prices-history",
+                    "https://clob.polymarket.com/v2/prices-history"):
+            r = requests.get(url, params={"market": yes_tok, "bucket_seconds": 60}, headers=H, timeout=30)
+            print(f"[3] {url}?bucket_seconds=60 -> {r.status_code} {r.text[:160]!r}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
