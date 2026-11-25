@@ -53,6 +53,33 @@ def section(title):
 
 probes = sys.argv[1:] or ["gamma-open", "gamma-resolved", "clob-book"]
 
+if "station" in probes:
+    d = date.today() - timedelta(days=2)
+    section(f"AWC /api/data/metar json, EDDM, ~30h ending {d + timedelta(days=1)}T02:00Z")
+    r = requests.get("https://aviationweather.gov/api/data/metar",
+                     params={"ids": "EDDM", "format": "json", "hours": 30,
+                             "date": (d + timedelta(days=1)).strftime("%Y%m%d") + "_0200"}, headers=H, timeout=30)
+    rows = r.json()
+    print("n reports:", len(rows))
+    shape(rows[0])
+    types = {}
+    for x in rows:
+        types[x.get("metarType")] = types.get(x.get("metarType"), 0) + 1
+    print("metarType counts:", types)
+    specis = [x.get("rawOb") for x in rows if x.get("metarType") != "METAR"][:3]
+    print("non-METAR examples:", specis)
+    print("raw with T-group (RMK T....):", [x.get("rawOb") for x in rows if " T0" in x.get("rawOb","") or " T1" in x.get("rawOb","")][:2])
+    section("IEM asos.py EDDM, report_type 3 (routine) vs 4 (specials), same day")
+    for rt in (3, 4):
+        r = requests.get("https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
+                         params={"station": "EDDM", "data": ["tmpc", "metar"], "tz": "Europe/Berlin",
+                                 "year1": d.year, "month1": d.month, "day1": d.day,
+                                 "year2": (d + timedelta(days=1)).year, "month2": (d + timedelta(days=1)).month,
+                                 "day2": (d + timedelta(days=1)).day, "format": "onlycomma", "latlon": "no",
+                                 "missing": "M", "direct": "no", "report_type": rt}, headers=H, timeout=60)
+        lines = r.text.strip().splitlines()
+        print(f"report_type={rt}: {len(lines)-1} rows | header: {lines[0]} | first: {lines[1] if len(lines)>1 else None}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
