@@ -170,6 +170,73 @@ if "price-history" in probes:
             r = requests.get(url, params={"market": yes_tok, "bucket_seconds": 60}, headers=H, timeout=30)
             print(f"[3] {url}?bucket_seconds=60 -> {r.status_code} {r.text[:160]!r}")
 
+if "price-history-2" in probes:
+    # C2 follow-up: data retention by market age, Data API v2, and what a
+    # CLOB 1-minute point actually is (forward-filled? trade-driven?).
+    import statistics
+    from datetime import datetime, timezone
+
+    def iso_ts(x):
+        return int(datetime.fromisoformat(x.replace("Z", "+00:00").replace(" ", "T")).timestamp())
+
+    for d in (date.today() - timedelta(days=3), date(2026, 10, 15), date(2026, 7, 15)):
+        slug = slug_for(d)
+        evs = requests.get(f"{GAMMA}/events", params={"slug": slug}, headers=H, timeout=20).json()
+        if not evs:
+            print(f"\n{slug}: not found"); continue
+        ev = evs[0]
+        m = max(ev["markets"], key=lambda m: float(m.get("volumeNum") or m.get("volume") or 0))
+        tok = json.loads(m["clobTokenIds"])[0]; cond = m["conditionId"]
+        t0, t1 = iso_ts(m["startDate"]), iso_ts(m["startDate"]) + 4 * 86400
+        section(f"{slug} | bracket {m.get('groupItemTitle')} | volume {float(m.get('volume') or 0):.0f}")
+
+        # CLOB 1-min
+        r = requests.get(f"{CLOB}/prices-history", params={"market": tok, "startTs": t0, "endTs": t1, "fidelity": 1},
+                         headers=H, timeout=30)
+        hist = r.json().get("history", []) if r.status_code == 200 else []
+        if hist:
+            gaps = [(b["t"] - a["t"]) / 60 for a, b in zip(hist, hist[1:])] or [0]
+            changes = sum(1 for a, b in zip(hist, hist[1:]) if a["p"] != b["p"])
+            print(f"[CLOB fidelity=1] {len(hist)} pts, median spacing {statistics.median(gaps):.0f} min, "
+                  f"price changes between consecutive points: {changes}")
+        else:
+            print(f"[CLOB fidelity=1] status {r.status_code}, 0 pts {r.text[:120]}")
+
+        # Data API v2 prices-history: omitted bucket (server picks densest), 300, 60
+        for bs in (None, 300, 60):
+            params = {"token_id": tok, "start": t0, "end": t1}
+            if bs: params["bucket_seconds"] = bs
+            r = requests.get("https://data-api.polymarket.com/v2/prices-history", params=params, headers=H, timeout=60)
+            try:
+                j = r.json()
+            except Exception:
+                j = {}
+            rows = j.get("data") or j.get("history") or []
+            keys = [k for k in j.keys()] if isinstance(j, dict) else type(j).__name__
+            print(f"[v2 prices-history bucket={bs}] {r.status_code} keys={keys} rows={len(rows)} "
+                  f"res={j.get('resolution_seconds') if isinstance(j, dict) else None} first={rows[:1]}")
+
+        # Data API v2 trades for this market (one page) -> shape + compare with CLOB
+        r = requests.get("https://data-api.polymarket.com/v2/trades", params={"condition": cond, "limit": 500},
+                         headers=H, timeout=60)
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        rows = (j.get("data") or []) if isinstance(j, dict) else []
+        print(f"[v2 trades condition=...] {r.status_code} rows on first page={len(rows)} "
+              f"pagination={j.get('pagination') if isinstance(j, dict) else None}")
+        if rows:
+            shape(rows[0])
+        if rows and d == date.today() - timedelta(days=3):
+            # what is a CLOB point? check a few trade times against the CLOB minute series
+            by_min = {h["t"] // 60: h["p"] for h in hist}
+            mine = [x for x in rows if str(x.get("token_id") or x.get("asset") or x.get("asset_id")) == tok][:8]
+            for x in mine:
+                ts = int(x.get("timestamp") or x.get("ts") or 0)
+                print(f"   trade {datetime.fromtimestamp(ts, timezone.utc):%m-%d %H:%M:%S} price {x.get('price')} "
+                      f"side {x.get('side')} | CLOB same minute {by_min.get(ts // 60)} next minute {by_min.get(ts // 60 + 1)}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
