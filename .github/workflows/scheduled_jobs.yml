@@ -33,6 +33,15 @@ on:
           - check-station    # compare EDDM station sources for the last 7 days (read-only)
           - probe            # print real API response structures (tools/probe_apis.py)
           - dry-run          # full pipeline on a throwaway SQLite DB (production DB untouched)
+          - backtest         # run one backtest script (backtest_args), save backtest_data/ as an artifact
+      backtest_args:
+        description: "For task=backtest: module + args, e.g. 'markets' or 'prices'"
+        type: string
+        default: "markets"
+      from_run:
+        description: "For task=backtest: start from the backtest_data artifact of this run id (optional)"
+        type: string
+        default: ""
       loop_minutes:
         description: "For task=logging: how long this logger loops (default 340 = 5h40m; small values for testing)"
         type: string
@@ -152,3 +161,37 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python3 Lead_Time_Sensitivity.py
+
+  backtest:
+    # Historical backtest data (Part C). Reads public APIs only; never
+    # touches the production database. Results are uploaded as the
+    # 'backtest-data' artifact of the run.
+    if: github.event_name == 'workflow_dispatch' && inputs.task == 'backtest'
+    permissions:
+      contents: read
+      actions: read      # to download a previous run's artifact (from_run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Start from a previous run's data (optional)
+        if: inputs.from_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ inputs.from_run }}" --repo "${{ github.repository }}" -n backtest-data -D backtest_data
+      - name: Run backtest step
+        run: python3 -m backtest.${{ inputs.backtest_args }}
+      - name: Save backtest_data as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-data
+          path: backtest_data/
+          if-no-files-found: warn
+          retention-days: 30

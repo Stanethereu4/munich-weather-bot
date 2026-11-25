@@ -261,6 +261,35 @@ if "om-meta" in probes:
               f"modified {fmt(j.get('last_run_modification_time'))} | "
               f"update every {j.get('update_interval_seconds')}s")
 
+if "single-runs" in probes:
+    # C3: which models does the Single Runs API keep, from when, what shape?
+    section("Open-Meteo Single Runs API (single-runs-api.open-meteo.com/v1/forecast)")
+    URL = "https://single-runs-api.open-meteo.com/v1/forecast"
+    models = ["ecmwf_ifs025", "ecmwf_ifs", "icon_seamless", "icon_d2", "icon_eu", "icon_global",
+              "gfs_seamless", "gfs025", "ncep_gfs025", "gem_global", "meteofrance_seamless",
+              "meteofrance_arpege_europe", "meteofrance_arome_france_hd"]
+    shown = False
+    for run in ("2026-11-20T00:00", "2026-11-20T03:00", "2026-07-15T00:00", "2026-06-01T00:00",
+                "2026-04-05T00:00", "2026-03-01T00:00"):
+        print(f"\nrun={run}")
+        for mdl in models:
+            r = requests.get(URL, params={"latitude": 48.3537, "longitude": 11.786, "run": run,
+                                          "models": mdl, "hourly": "temperature_2m",
+                                          "timezone": "UTC"}, headers=H, timeout=60)
+            try:
+                j = r.json()
+            except Exception:
+                j = {}
+            if r.status_code == 200 and "hourly" in j:
+                t = j["hourly"].get("time", []); v = j["hourly"].get("temperature_2m", [])
+                nn = [x for x in v if x is not None]
+                print(f"  {mdl:<30} OK  {len(t)} hours {t[0] if t else ''} -> {t[-1] if t else ''} | non-null {len(nn)}")
+                if not shown:
+                    print("  response keys:", list(j.keys()), "| hourly keys:", list(j["hourly"].keys()),
+                          "| hourly_units:", j.get("hourly_units")); shown = True
+            else:
+                print(f"  {mdl:<30} {r.status_code} {str(j.get('reason', r.text))[:110]}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)

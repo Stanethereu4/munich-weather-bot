@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 .cache_*.sqlite
 weather_bot.db
+backtest_data/
