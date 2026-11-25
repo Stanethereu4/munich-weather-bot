@@ -248,6 +248,16 @@ NEW_COLUMNS = [
     ("predictions", "snapshot_id", "TEXT"),
     ("predictions", "token_id", "TEXT"),
     ("forecast_snapshots", "ts_utc", "TEXT"),
+    # A5 -- tradable prices from the CLOB order book (YES token), 0-1.
+    # depth_5c = shares available within 5 cents of the best price.
+    ("price_snapshots", "best_bid", "REAL"),
+    ("price_snapshots", "best_ask", "REAL"),
+    ("price_snapshots", "mid", "REAL"),
+    ("price_snapshots", "bid_depth_5c", "REAL"),
+    ("price_snapshots", "ask_depth_5c", "REAL"),
+    ("predictions", "best_bid", "REAL"),
+    ("predictions", "best_ask", "REAL"),
+    ("predictions", "entry_cost", "REAL"),   # price + fee actually paid for the chosen side
 ]
 
 

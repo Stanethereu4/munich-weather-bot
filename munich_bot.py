@@ -104,34 +104,47 @@ def calculate_bracket_probability(mean_temp, sigma, bounds):
         return norm.cdf((t_max - mean_temp) / sigma) - norm.cdf((t_min - mean_temp) / sigma)
 
 
-def decide_side_and_edge(model_prob, market_price, theta=0.05):
+def taker_fee_per_share(price, theta=POLYMARKET_THETA):
+    """Fee per share when buying at `price` (formula in the config above)."""
+    return theta * price * (1.0 - price)
+
+
+def decide_side_and_edge(model_prob, best_bid, best_ask, theta=0.05):
     """
-    Determines which side (YES/NO) has positive net edge, and the
-    effective cost basis for that side (price + fee) -- but no longer
-    does per-bracket Kelly sizing. Sizing is now handled jointly
-    across the whole event by kelly_multi.solve_joint_kelly, which
-    respects a single shared bankroll constraint across mutually
-    exclusive/overlapping bets instead of treating each bracket as if
-    it had its own bankroll.
+    Decides YES / NO / no trade for one bracket using prices we could
+    ACTUALLY trade at, not the midpoint:
+      - buying YES costs the best YES ask
+      - buying NO costs 1 - best YES bid. For these linked (neg-risk)
+        markets the NO book is an exact mirror of the YES book (checked
+        live 25 Nov 2026: NO ask 0.45 = 1 - YES bid 0.55), so this equals
+        the NO token's own best ask.
+    Worked example: model says 40%, book is bid 0.30 / ask 0.34.
+      YES: cost 0.34 + fee 0.05*0.34*0.66 = 0.3512 -> edge 0.40-0.3512 = +4.9%
+      NO:  cost 0.70 + fee 0.05*0.70*0.30 = 0.7105 -> edge 0.60-0.7105 = -11.1%
+      -> BUY YES (edge above the 3% threshold).
+    Returns (signal, net_edge, side, cost_per_share). Sizing happens
+    jointly across the event in kelly_multi.solve_joint_kelly.
     """
-    if market_price <= 0.001 or market_price >= 0.999:
-        return "NO TRADE", 0.0, None, None
+    net_edge_yes = net_edge_no = float("-inf")
+    cost_yes = cost_no = None
 
-    fee_per_share = theta * market_price * (1.0 - market_price)
+    if best_ask is not None and 0.0 < best_ask < 1.0:
+        cost_yes = best_ask + taker_fee_per_share(best_ask, theta)
+        net_edge_yes = model_prob - cost_yes
+    if best_bid is not None and 0.0 < best_bid < 1.0:
+        price_no = 1.0 - best_bid
+        cost_no = price_no + taker_fee_per_share(price_no, theta)
+        net_edge_no = (1.0 - model_prob) - cost_no
 
-    cost_yes = market_price + fee_per_share
-    net_edge_yes = model_prob - cost_yes
-
-    price_no = 1.0 - market_price
-    cost_no = price_no + fee_per_share
-    net_edge_no = (1.0 - model_prob) - cost_no
+    if cost_yes is None and cost_no is None:
+        return "NO TRADE", 0.0, None, None   # empty book on both sides
 
     if net_edge_yes >= MIN_EDGE_THRESHOLD and net_edge_yes >= net_edge_no:
         return "BUY YES", net_edge_yes, "YES", cost_yes
     elif net_edge_no >= MIN_EDGE_THRESHOLD:
         return "BUY NO", net_edge_no, "NO", cost_no
 
-    best_edge = net_edge_yes if net_edge_yes > net_edge_no else net_edge_no
+    best_edge = max(net_edge_yes, net_edge_no)
     return "NO TRADE", best_edge, None, None
 
 
@@ -444,6 +457,26 @@ def fetch_orderbook_depth(token_id: str):
         return [], []
 
 
+def top_of_book(bids, asks, depth_window=0.05):
+    """
+    Best bid / best ask / midpoint from a raw CLOB book, plus how many
+    shares sit within `depth_window` (5 cents) of each best price.
+    The CLOB returns bids sorted ascending and asks descending (best
+    price LAST), but we take max/min explicitly rather than rely on order.
+    Returns a dict; values are None when a side is empty.
+    """
+    bid_px = [(float(l["price"]), float(l["size"])) for l in bids]
+    ask_px = [(float(l["price"]), float(l["size"])) for l in asks]
+    best_bid = max((p for p, _ in bid_px), default=None)
+    best_ask = min((p for p, _ in ask_px), default=None)
+    mid = (best_bid + best_ask) / 2 if best_bid is not None and best_ask is not None else None
+    bid_depth = sum(sz for p, sz in bid_px if best_bid is not None and p >= best_bid - depth_window - 1e-9)
+    ask_depth = sum(sz for p, sz in ask_px if best_ask is not None and p <= best_ask + depth_window + 1e-9)
+    return {"best_bid": best_bid, "best_ask": best_ask, "mid": mid,
+            "bid_depth_5c": bid_depth if best_bid is not None else None,
+            "ask_depth_5c": ask_depth if best_ask is not None else None}
+
+
 def log_orderbook_depth(event_slug, question, bids, asks, token_id=None, bracket_label=None,
                         snapshot_id=None, ts_utc=None):
     """Logs every visible price level, not just top-of-book. Cadence:
@@ -466,18 +499,28 @@ def log_orderbook_depth(event_slug, question, bids, asks, token_id=None, bracket
     conn.close()
 
 
-def log_price_snapshot(event_slug, brackets, snapshot_id, ts_utc):
+def log_price_snapshot(event_slug, brackets, snapshot_id, ts_utc, books=None):
     """--prices-only path: one row per bracket, all sharing the same
-    snapshot_id and UTC timestamp. Prices are probabilities 0-1."""
+    snapshot_id and UTC timestamp. All prices are probabilities 0-1:
+    gamma_price = Gamma's displayed price (a midpoint), best_bid /
+    best_ask / mid = CLOB top of book (what you could actually trade at)."""
+    books = books or {}
     conn = get_connection()
     cur = conn.cursor()
-    rows = [(event_slug, b["question"], label, b["token_id"], b["price"], snapshot_id, ts_utc)
-            for label, b in brackets.items() if b["price"] is not None]
+    rows = []
+    for label, b in brackets.items():
+        tob = books.get(label) or {}
+        if b["price"] is None and not tob:
+            continue
+        rows.append((event_slug, b["question"], label, b["token_id"], b["price"],
+                     tob.get("best_bid"), tob.get("best_ask"), tob.get("mid"),
+                     tob.get("bid_depth_5c"), tob.get("ask_depth_5c"), snapshot_id, ts_utc))
     if rows:
         cur.executemany("""
             INSERT INTO price_snapshots (event_slug, market_question, bracket_label, token_id,
-                                         gamma_price, snapshot_id, ts_utc)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                                         gamma_price, best_bid, best_ask, mid,
+                                         bid_depth_5c, ask_depth_5c, snapshot_id, ts_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, rows)
     conn.commit()
     conn.close()
@@ -501,14 +544,17 @@ def run_prices_only_all_open_events():
     for event in events:
         # Everything logged for this event in this pass shares one id + time.
         snapshot_id, ts = new_snapshot_id(), utc_now_iso()
-        n_prices = log_price_snapshot(event["event_slug"], event["brackets"], snapshot_id, ts)
 
+        books = {}
         for label, b in event["brackets"].items():
             bids, asks = fetch_orderbook_depth(b["token_id"])
             if bids or asks:
+                books[label] = top_of_book(bids, asks)
                 log_orderbook_depth(event["event_slug"], b["question"], bids, asks,
                                     token_id=b["token_id"], bracket_label=label,
                                     snapshot_id=snapshot_id, ts_utc=ts)
+
+        n_prices = log_price_snapshot(event["event_slug"], event["brackets"], snapshot_id, ts, books)
 
         print(f"[prices-only] {event['event_slug']} (target_date={event['target_date']}): "
               f"logged {n_prices} price rows + depth for {len(event['brackets'])} brackets "
@@ -527,13 +573,14 @@ def log_predictions(target_date_str, event_slug, questions_by_label, rows,
                 target_date, event_slug, market_question, bracket_label,
                 model_prob, market_price, net_edge, signal, kelly_fraction,
                 bet_amount, calibrated_mean_temp, sigma_used, lead_time_hours,
-                token_id, snapshot_id, ts_utc
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                token_id, snapshot_id, ts_utc, best_bid, best_ask, entry_cost
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             target_date_str, event_slug, questions_by_label.get(r["label"], r["label"]), r["label"],
             r["model_prob"], r["market_price"], r["net_edge"], r["signal"], r["kelly_fraction"],
             r["bet_amount"], calibrated_mean, sigma, lead_time_hours,
             tokens_by_label.get(r["label"]), snapshot_id, ts,
+            r.get("best_bid"), r.get("best_ask"), r.get("entry_cost"),
         ))
     conn.commit()
     conn.close()
@@ -702,6 +749,15 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
         print("=" * 105)
         return
 
+    # Tradable prices: fetch each bracket's CLOB book (YES token). The
+    # "market probability" shown/logged is the book midpoint; the cost of
+    # a trade is the ask (YES) or 1 - bid (NO) -- see decide_side_and_edge.
+    books = {}
+    for label, tok in tokens_by_label.items():
+        bids, asks = fetch_orderbook_depth(tok)
+        if bids or asks:
+            books[label] = top_of_book(bids, asks)
+
     model_probs = {}
     for label in market_prices.keys():
         bounds_tuple = parse_label_to_bounds(label)
@@ -709,19 +765,26 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
             model_probs[label] = calculate_bracket_probability(calibrated_mean, sigma, bounds_tuple)
 
     print("\n" + "-" * 105)
-    print(f" {'Bracket':<18} | {'Model P':<8} | {'Mkt P':<7} | {'Net Edge':<9} | {'Signal':<15} | {'Kelly Rec ($)':<14}")
+    print(f" {'Bracket':<18} | {'Model P':<8} | {'Mid':<7} | {'Bid/Ask':<11} | {'Net Edge':<9} | {'Signal':<15} | {'Kelly Rec ($)':<14}")
     print("-" * 105)
 
     # PASS 1: decide side (YES/NO/no-trade) and edge per bracket, no sizing yet.
     all_labels = list(model_probs.keys())
     all_probs = [model_probs[lbl] for lbl in all_labels]
     decisions = {}
-    for label, mkt_price in market_prices.items():
+    for label, gamma_price in market_prices.items():
         if label not in model_probs:
             continue
         mod_p = model_probs[label]
-        signal, net_edge, side, cost = decide_side_and_edge(mod_p, mkt_price, POLYMARKET_THETA)
-        decisions[label] = {"model_prob": mod_p, "market_price": mkt_price,
+        tob = books.get(label, {})
+        if tob.get("best_bid") is None and tob.get("best_ask") is None:
+            print(f" {label:<18} | no order book -- skipped")
+            continue
+        signal, net_edge, side, cost = decide_side_and_edge(
+            mod_p, tob.get("best_bid"), tob.get("best_ask"), POLYMARKET_THETA)
+        mid = tob.get("mid") if tob.get("mid") is not None else gamma_price
+        decisions[label] = {"model_prob": mod_p, "market_price": mid,
+                             "best_bid": tob.get("best_bid"), "best_ask": tob.get("best_ask"),
                              "signal": signal, "net_edge": net_edge, "side": side, "cost": cost}
 
     # PASS 2: joint sizing across every tradeable bracket in this event,
@@ -740,13 +803,16 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
         bet_amount = kr.stake_dollars if kr else 0.0
         kelly_frac = kr.fraction_after_multiplier if kr else 0.0
         pos_str = f"${bet_amount:>6.2f} ({kelly_frac*100:>4.1f}%)" if bet_amount > 0 else "$0.00 (0.0%)"
-        print(f" {label:<18} | {d['model_prob']*100:>6.1f}% | {d['market_price']*100:>5.1f}% | "
+        ba = (f"{d['best_bid'] if d['best_bid'] is not None else '-'}/"
+              f"{d['best_ask'] if d['best_ask'] is not None else '-'}")
+        print(f" {label:<18} | {d['model_prob']*100:>6.1f}% | {d['market_price']*100:>5.1f}% | {ba:<11} | "
               f"{d['net_edge']*100:>+7.1f}% | {d['signal']:<15} | {pos_str}")
 
         log_rows.append({
             "label": label, "model_prob": d["model_prob"], "market_price": d["market_price"],
             "net_edge": d["net_edge"], "signal": d["signal"], "kelly_fraction": kelly_frac,
-            "bet_amount": bet_amount,
+            "bet_amount": bet_amount, "best_bid": d["best_bid"], "best_ask": d["best_ask"],
+            "entry_cost": d["cost"],
         })
     print("=" * 105)
     total_staked = sum(r["bet_amount"] for r in log_rows)
