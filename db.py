@@ -65,8 +65,10 @@ import sqlite3
 DB_FILE = "weather_bot.db"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# (horizon_days, sigma_c) measured from Open-Meteo Previous Runs API.
-FALLBACK_SIGMAS = [(1, 0.77), (2, 0.99), (3, 1.14)]
+# (horizon_days, sigma_c) measured with Lead_Time_Sensitivity.py on
+# 25 Nov 2026: Previous Runs API forecasts vs the EDDM station max
+# (whole °C, 366 days). Only used if leadtime_calibration is empty.
+FALLBACK_SIGMAS = [(0, 0.63), (1, 1.17), (2, 1.36), (3, 1.49)]
 
 
 # ---------------------------------------------------------------------
@@ -244,7 +246,7 @@ def latest_leadtime_sigma(lead_time_hours: float) -> float:
         # not an invented number. The old 0.60C fallback was ~40% too
         # narrow at 48h and made the model systematically overconfident.
         print("[db] WARNING: no leadtime_calibration rows found -- using "
-              "measured fallback sigmas (24h 0.77, 48h 0.99, 72h 1.14 C).")
+              "measured fallback sigmas (0h 0.63, 24h 1.17, 48h 1.36, 72h 1.49 C).")
         rows = FALLBACK_SIGMAS
 
     target_days = lead_time_hours / 24.0
