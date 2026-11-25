@@ -149,6 +149,8 @@ def main(kind="high"):
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        if bt.empty:
+            raise ValueError("no beta estimates (too few market-days)")
         a = bt[(bt["sample"] == "all") & (bt["horizon"] != "pre_1h")]
         x = [int(h[:-1]) / 60 for h in a["horizon"]]
         fig, ax = plt.subplots(figsize=(7, 4))
