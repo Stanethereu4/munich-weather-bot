@@ -821,8 +821,13 @@ def run_scanner_for_all_open_events():
         # new market opens (near 62h out) vs one about to resolve.
         lead_time_hours = hours_until_local_day_start(event["target_date"])
 
-        run_phase5_scanner(target_date_str=target_date_str, lead_time_hours=lead_time_hours,
-                            pre_discovered_event=event)
+        # One market failing (e.g. an API timeout) must not stop the others.
+        try:
+            run_phase5_scanner(target_date_str=target_date_str, lead_time_hours=lead_time_hours,
+                                pre_discovered_event=event)
+        except Exception as e:
+            print(f"[full-run] {event['event_slug']} FAILED, skipping to the next market: "
+                  f"{type(e).__name__}: {str(e)[:200]}")
 
 
 def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=None):
