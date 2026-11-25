@@ -41,9 +41,17 @@ MODELS = {
     "meteofrance_seamless": "Météo-France",
 }
 
-cache_session = requests_cache.CachedSession('.cache_phase5_kelly', expire_after=3600)
-retry_session = retry(cache_session, retries=3, backoff_factor=0.3)
-openmeteo = openmeteo_requests.Client(session=retry_session)
+# Two Open-Meteo clients:
+#  - openmeteo_live: NO cache. Live forecasts must be fresh: with a 1-hour
+#    cache a new model run could be ignored for up to an hour, which would
+#    wreck any timing analysis ("when did our model react to a new run?").
+#  - openmeteo_hist: cached for 1 hour. Historical data (30-day blend
+#    calibration) doesn't change between runs, so caching only saves calls.
+openmeteo_live = openmeteo_requests.Client(
+    session=retry(requests.Session(), retries=3, backoff_factor=0.3))
+openmeteo_hist = openmeteo_requests.Client(
+    session=retry(requests_cache.CachedSession('.cache_phase5_kelly', expire_after=3600),
+                  retries=3, backoff_factor=0.3))
 
 
 def get_horizon_sigma(lead_time_hours):
@@ -134,7 +142,7 @@ def fetch_live_ensemble_forecast(target_date_str):
         "hourly": "temperature_2m", "models": list(MODELS.keys()),
         "timezone": "Europe/Berlin",
     }
-    responses = openmeteo.weather_api(url, params=params)
+    responses = openmeteo_live.weather_api(url, params=params)
     live_maxes = []
     per_model_max = {}
 
@@ -234,7 +242,7 @@ def fetch_and_log_all_ensemble_members(target_date_str):
         "timezone": "Europe/Berlin",
     }
     try:
-        responses = openmeteo.weather_api(url, params=params)
+        responses = openmeteo_live.weather_api(url, params=params)
     except Exception as e:
         print(f"[ensemble-log] fetch failed for {target_date_str}: {e}")
         return 0
@@ -293,7 +301,7 @@ def fetch_calibration_data(target_date_str):
         "hourly": "temperature_2m", "models": list(MODELS.keys()),
         "timezone": "Europe/Berlin",
     }
-    resp_m = openmeteo.weather_api(url_m, params=params_m)
+    resp_m = openmeteo_hist.weather_api(url_m, params=params_m)
 
     model_daily_max = {m: {} for m in MODELS.keys()}
     for model_key, response in zip(MODELS.keys(), resp_m):
