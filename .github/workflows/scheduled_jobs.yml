@@ -29,6 +29,9 @@ on:
           - calibrate        # measure forecast error per horizon -> leadtime_calibration
           - check-station    # compare EDDM station sources for the last 7 days (read-only)
 
+env:
+  PYTHONUNBUFFERED: "1"   # print output immediately (otherwise lost if a run is killed)
+
 jobs:
   logger:
     if: >-
@@ -56,11 +59,11 @@ jobs:
           while [ "$(date +%s)" -lt "$stop_at" ]; do
             now=$(date +%s)
             echo "::group::$(date -u +%FT%TZ) price snapshot"
-            python3 munich_bot.py --prices-only || echo "[loop] price snapshot failed"
+            timeout 300 python3 munich_bot.py --prices-only || echo "[loop] price snapshot failed or timed out (5 min)"
             echo "::endgroup::"
             if [ $(( now - last_full )) -ge $(( 4*3600 - 300 )) ]; then
               echo "::group::$(date -u +%FT%TZ) full model run + settlement"
-              python3 munich_bot.py || echo "[loop] full run failed"
+              timeout 600 python3 munich_bot.py || echo "[loop] full run failed or timed out (10 min)"
               echo "::endgroup::"
               last_full=$now
             fi
@@ -84,6 +87,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python3 munich_bot.py --prices-only
       - name: Full model run + settlement
+        timeout-minutes: 10
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python3 munich_bot.py
