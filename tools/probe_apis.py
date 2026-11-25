@@ -338,6 +338,43 @@ if "ens-mean" in probes:
                   + (f"15 Jul 12z mean={h['temperature_2m'][idx]} spread={h.get('temperature_2m_spread', [None]*999)[idx]}"
                      if idx is not None else str(j.get('reason', ''))[:100]))
 
+if "ens-recent" in probes:
+    # For the last few days: can we get ensemble forecasts AS ISSUED per run (no look-ahead)?
+    import time
+    section("Recent ensemble runs: per-run access?")
+    def get(url, params, tries=3):
+        for k in range(tries):
+            try:
+                return requests.get(url, params=params, headers=H, timeout=(10, 60))
+            except requests.RequestException:
+                time.sleep(4 * (k + 1))
+        return None
+    def show(tag, r, want="2026-11-24T12:00"):
+        if r is None:
+            print(f"  {tag}: no response"); return
+        try:
+            j = r.json()
+        except Exception:
+            print(f"  {tag}: {r.status_code} non-json"); return
+        if r.status_code != 200:
+            print(f"  {tag}: {r.status_code} {str(j.get('reason',''))[:110]}"); return
+        h = j.get("hourly", {}); t = h.get("time", [])
+        keys = [k for k in h if k != "time"]
+        i = t.index(want) if want in t else None
+        sample = {k: h[k][i] for k in keys[:3]} if i is not None else "target hour absent"
+        print(f"  {tag}: 200 n_keys={len(keys)} first_keys={keys[:4]} time {t[0] if t else None}..{t[-1] if t else None} sample@{want}={sample}")
+    loc = {"latitude": 48.3537, "longitude": 11.786, "timezone": "UTC"}
+    for m in ["ecmwf_ifs025", "icon_seamless", "gfs_seamless", "ecmwf_aifs025", "ecmwf_ifs025_ensemble_mean"]:
+        print(m)
+        show("single-runs run=2026-11-23T00", get("https://single-runs-api.open-meteo.com/v1/forecast",
+             {**loc, "models": m, "hourly": "temperature_2m", "run": "2026-11-23T00:00"}))
+        show("ensemble-api run=2026-11-23T00", get("https://ensemble-api.open-meteo.com/v1/ensemble",
+             {**loc, "models": m, "hourly": "temperature_2m", "run": "2026-11-23T00:00"}))
+        show("ensemble-api start 22..25", get("https://ensemble-api.open-meteo.com/v1/ensemble",
+             {**loc, "models": m, "hourly": "temperature_2m", "start_date": "2026-11-22", "end_date": "2026-11-25"}))
+        show("ensemble-api previous_day1", get("https://ensemble-api.open-meteo.com/v1/ensemble",
+             {**loc, "models": m, "hourly": "temperature_2m_previous_day1", "past_days": 3, "forecast_days": 1}))
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
