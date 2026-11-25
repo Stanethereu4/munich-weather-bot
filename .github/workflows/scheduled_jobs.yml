@@ -1,13 +1,16 @@
 name: Munich Weather Bot - Scheduled Logging
 
 # How logging stays continuous:
-#   GitHub's cron is best-effort and skips most 15-minute triggers, so
-#   instead of one short run per snapshot, the `logger` job runs for
-#   ~5h50m and loops internally: a price snapshot every quarter hour,
-#   a full model run + settlement every 4 hours. An hourly trigger
-#   queues the next logger (concurrency group, max one waiting), so
-#   when one finishes the next starts right away. Even if GitHub drops
-#   most hourly triggers, one getting through every ~6h is enough.
+#   GitHub's cron is best-effort (overnight on 24-25 Nov it fired zero
+#   times in 8 hours), so the `logger` job keeps itself alive:
+#   - it runs for ~5h40m, looping internally: a price snapshot every
+#     quarter hour, a full model run + settlement every 4 hours;
+#   - its last step starts the NEXT logger run via the GitHub API
+#     (workflow_dispatch is the one event a workflow may trigger with its
+#     own GITHUB_TOKEN), so the chain continues on its own;
+#   - the hourly cron stays as a backup restart if the chain ever breaks.
+#   Only one logger runs at a time (concurrency group, max one waiting).
+#   To STOP logging: Actions tab -> this workflow -> "..." -> Disable workflow.
 #   (Repo is public -> Actions minutes are free.)
 #
 # GitHub auto-disables scheduled workflows after 60 days without a push
@@ -30,6 +33,10 @@ on:
           - check-station    # compare EDDM station sources for the last 7 days (read-only)
           - probe            # print real API response structures (tools/probe_apis.py)
           - dry-run          # full pipeline on a throwaway SQLite DB (production DB untouched)
+      loop_minutes:
+        description: "For task=logging: how long this logger loops (default 340 = 5h40m; small values for testing)"
+        type: string
+        default: "340"
       probe_args:
         description: "For task=probe: which probes to run (space-separated, empty = default set)"
         type: string
@@ -46,6 +53,9 @@ jobs:
     concurrency:
       group: logger
       cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write     # needed to start the next logger run (self-chaining)
     runs-on: ubuntu-latest
     timeout-minutes: 355
     steps:
@@ -60,7 +70,10 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
-          stop_at=$(( $(date +%s) + 5*3600 + 40*60 ))
+          # Scheduled runs have no inputs -> default 340 minutes.
+          minutes="${{ inputs.loop_minutes || '340' }}"
+          case "$minutes" in ''|*[!0-9]*) echo "loop_minutes must be a whole number"; exit 1;; esac
+          stop_at=$(( $(date +%s) + minutes*60 ))
           last_full=0
           while [ "$(date +%s)" -lt "$stop_at" ]; do
             now=$(date +%s)
@@ -75,6 +88,12 @@ jobs:
             fi
             sleep $(( 900 - $(date +%s) % 900 ))   # wake at the next quarter hour
           done
+      - name: Start the next logger run (self-chaining)
+        # success() || failure(): chain on, but NOT if someone cancelled this run on purpose.
+        if: success() || failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run "${{ github.workflow }}" --repo "${{ github.repository }}" --ref "${{ github.ref_name }}" -f task=logging
 
   once:
     if: github.event_name == 'workflow_dispatch' && inputs.task == 'once'
