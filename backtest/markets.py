@@ -13,7 +13,7 @@ Output: backtest_data/markets.csv with columns
     kind, target_date, event_slug, bracket_label, yes_token, no_token,
     condition_id, market_start, market_end, closed_time, won, volume
 
-Run:  python3 -m backtest.markets [first_date]     (default first_date: 2026-05-01)
+Run:  python3 -m backtest.markets [first_date]     (default first_date: 2026-03-01)
 Adding another city later = adding its slug prefixes to SERIES below
 (airport-station cities only, see the research doc).
 """
@@ -120,4 +120,4 @@ def main(first=date(2026, 5, 1)):
 
 
 if __name__ == "__main__":
-    main(date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else date(2026, 5, 1))
+    main(date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else date(2026, 3, 1))

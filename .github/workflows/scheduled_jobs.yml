@@ -164,12 +164,15 @@ jobs:
 
   backtest:
     # Historical backtest data (Part C). Reads public APIs only; never
-    # touches the production database. Results are uploaded as the
-    # 'backtest-data' artifact of the run.
+    # touches the production database. Data lives on the separate
+    # 'backtest-data' branch (never merged into main): each run starts from
+    # what is already there and pushes its new/updated files back.
     if: github.event_name == 'workflow_dispatch' && inputs.task == 'backtest'
+    concurrency:
+      group: backtest-data     # one writer at a time
+      cancel-in-progress: false
     permissions:
-      contents: read
-      actions: read      # to download a previous run's artifact (from_run)
+      contents: write          # push to the backtest-data branch
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
@@ -179,19 +182,26 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Start from a previous run's data (optional)
-        if: inputs.from_run != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run download "${{ inputs.from_run }}" --repo "${{ github.repository }}" -n backtest-data -D backtest_data
+        run: pip install -r requirements.txt pyarrow
+      - name: Get existing backtest data (branch backtest-data, if it exists)
+        run: |
+          if git ls-remote --exit-code --heads origin backtest-data >/dev/null; then
+            git fetch --depth 1 origin backtest-data
+            git worktree add /tmp/bd origin/backtest-data
+          else
+            git worktree add --detach /tmp/bd
+            (cd /tmp/bd && git checkout --orphan tmp-bd && git rm -rfq . )
+          fi
+          mkdir -p /tmp/bd/backtest_data
+          ln -s /tmp/bd/backtest_data backtest_data
       - name: Run backtest step
         run: python3 -m backtest.${{ inputs.backtest_args }}
-      - name: Save backtest_data as an artifact
+      - name: Save to the backtest-data branch
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backtest-data
-          path: backtest_data/
-          if-no-files-found: warn
-          retention-days: 30
+        run: |
+          cd /tmp/bd
+          git add -A backtest_data
+          if git diff --cached --quiet; then echo "nothing new"; exit 0; fi
+          git -c user.name="backtest bot" -c user.email="actions@users.noreply.github.com" \
+              commit -qm "backtest data: ${{ inputs.backtest_args }} (run ${{ github.run_id }})"
+          git push -q origin HEAD:refs/heads/backtest-data
