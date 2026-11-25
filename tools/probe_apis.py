@@ -89,7 +89,14 @@ if "gamma-lowest" in probes:
         for pat in ("lowest-temperature-in-munich-on-{m}-{d}-{y}", "minimum-temperature-in-munich-on-{m}-{d}-{y}"):
             slug = pat.format(m=d.strftime('%B').lower(), d=d.day, y=d.year)
             r = requests.get(f"{GAMMA}/events", params={"slug": slug}, headers=H, timeout=20).json()
-            print(f"{slug}: {'FOUND' if r else '-'}")
+            if r:
+                hi = requests.get(f"{GAMMA}/events", params={"slug": slug.replace("lowest", "highest")},
+                                  headers=H, timeout=20).json()
+                h = hi[0] if hi else {}
+                print(f"{slug}: FOUND | volume {r[0].get('volume')} liquidity {r[0].get('liquidity')}"
+                      f" || same-day HIGHEST market: volume {h.get('volume')} liquidity {h.get('liquidity')}")
+            else:
+                print(f"{slug}: -")
             if r and found is None:
                 found = r[0]
     # also look at the series for Munich (the max markets are series 'munich-daily-weather')
