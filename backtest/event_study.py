@@ -129,8 +129,31 @@ def main(kind="high"):
                    + [beta_table(ev[ev["model"] == m], f"model={m}") for m in sorted(ev["model"].unique())])
     bt.to_csv(os.path.join(OUT, f"beta_{kind}.csv"), index=False)
 
+    # ---- information content of model releases ----
+    # Does our model's change predict the OUTCOME beyond the price at t0?
+    # coef > 0: the release carried information the market hadn't priced.
+    d = ev[["won", "p0", "dp_model", "p_after", "event_slug"]].dropna()
+    info = []
+    for name, sub in (("all moves", d), ("moves >= 5 pts", d[d["dp_model"].abs() >= 0.05])):
+        if sub["event_slug"].nunique() >= 10:
+            b, se, _ = clustered_ols(sub["won"] - sub["p0"], sub["dp_model"], pd.factorize(sub["event_slug"])[0])
+            info.append({"test": f"(won - price) on model change, {name}", "coef": b, "se": se, "n": len(sub)})
+    if d["event_slug"].nunique() >= 10:
+        b, se, _ = clustered_ols(d["won"] - d["p0"], d["p_after"] - d["p0"], pd.factorize(d["event_slug"])[0])
+        info.append({"test": "(won - price) on (model level - price)", "coef": b, "se": se, "n": len(d)})
+    info = pd.DataFrame(info)
+
     # ---- D3 ----
     lg["p_mkt"] = [price_at(prices, tok, t) for tok, t in zip(lg["yes_token"], lg["t"])]
+    # Coherence: the brackets of one market should add up to ~1. In near-empty
+    # books the "price" is a midpoint between a lone bid and ask (e.g. 0.5),
+    # and the sum can be far above 1 -- then it is not a market probability.
+    sums = lg.dropna(subset=["p_mkt"]).groupby(["event_slug", "t"])["p_mkt"].sum()
+    coherent = sums.between(0.9, 1.1)
+    print(f"\nprice coherence ({kind}): sum of bracket prices per snapshot median {sums.median():.2f} "
+          f"(10-90%: {sums.quantile(.1):.2f}-{sums.quantile(.9):.2f}); coherent (0.9-1.1): {coherent.mean():.0%}")
+    keep = coherent[coherent].index
+    lg = lg.set_index(["event_slug", "t"]).loc[lambda x: x.index.isin(keep)].reset_index()
     lt = level_table(lg)
     lt.to_csv(os.path.join(OUT, f"level_{kind}.csv"), index=False)
 
@@ -142,7 +165,9 @@ def main(kind="high"):
     with pd.option_context("display.width", 160, "display.max_columns", 20):
         print("\nD1/D2 beta by horizon (clustered by market-day):")
         print(bt.round(3).to_string(index=False))
-        print("\nD3 level test (lower is better):")
+        print("\nInformation in model releases (clustered SEs):")
+        print(info.round(3).to_string(index=False))
+        print("\nD3 level test, coherent snapshots only (lower is better):")
         print(lt.round(4).to_string(index=False))
 
     try:
@@ -157,6 +182,7 @@ def main(kind="high"):
         ax.errorbar(x, a["beta"], yerr=1.96 * a["se"], fmt="o-", capsize=4)
         ax.axhline(1, ls="--", lw=1, color="grey"); ax.axhline(0, lw=1, color="grey")
         ax.set_xscale("log"); ax.set_xticks(x); ax.set_xticklabels(a["horizon"])
+        ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
         ax.set_xlabel("time after the model release"); ax.set_ylabel("beta (share of model change followed)")
         ax.set_title(f"Munich {kind}: market response to model releases (95% CI)")
         fig.tight_layout(); fig.savefig(os.path.join(OUT, f"beta_{kind}.png"), dpi=130)
