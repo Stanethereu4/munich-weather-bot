@@ -44,12 +44,15 @@ import requests_cache
 from retry_requests import retry
 
 from db import init_db, get_connection
+from station_obs import fetch_daily_max as fetch_station_daily_max
 
 # --- CONFIGURATION ---
 LATITUDE = 48.3537
 LONGITUDE = 11.7860
 DAYS_TO_EVALUATE = 365          # capped by actual archive availability, see note below
-HORIZON_DAYS = [1, 2, 3]        # Polymarket weather markets open ~62h (2.58 days) before
+HORIZON_DAYS = [0, 1, 2, 3]     # 0 = same-day run (the plain temperature_2m series
+                                 # in the Previous Runs API), needed for same-day markets.
+                                 # Polymarket weather markets open ~62h (2.58 days) before
                                  # resolution -- there's no tradeable market at a 4-day
                                  # horizon at all, so measuring sigma there was wasted
                                  # effort (and was also the thinnest-coverage horizon).
@@ -111,7 +114,8 @@ def fetch_previous_run_forecasts(start_str, end_str, horizon_day):
     against the live docs on first run -- suffix conventions can shift.
     """
     url = "https://previous-runs-api.open-meteo.com/v1/forecast"
-    hourly_vars = [f"temperature_2m_previous_day{horizon_day}"]
+    hourly_vars = ["temperature_2m" if horizon_day == 0
+                   else f"temperature_2m_previous_day{horizon_day}"]
     params = {
         "latitude": LATITUDE, "longitude": LONGITUDE,
         "start_date": start_str, "end_date": end_str,
@@ -171,7 +175,10 @@ def run_real_leadtime_measurement():
     print("(Previous Runs API archive starts Jan 2024 for most models -- if your "
           "DAYS_TO_EVALUATE window predates that, results will be shorter than requested.)\n")
 
-    actuals = fetch_ground_truth_max(start_str, end_str)
+    # Ground truth = EDDM station (METAR) daily max in whole °C -- what
+    # Polymarket resolves on -- not the Open-Meteo grid. Sigma measured
+    # against the grid understates the real error versus resolution.
+    actuals = fetch_station_daily_max(start_str, end_str, verbose=True)
 
     print(f"{'Horizon':<12} | {'Ensemble MAE':<15} | {'Measured Sigma':<16} | {'ECMWF Wgt':<10} | {'N days':<8}")
     print("-" * 75)

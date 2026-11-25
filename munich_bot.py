@@ -12,6 +12,7 @@ import requests_cache
 from retry_requests import retry
 
 from db import init_db, get_connection, latest_leadtime_sigma
+from station_obs import fetch_daily_max as fetch_station_daily_max
 from kelly_multi import Candidate, solve_joint_kelly
 
 # --- CONFIGURATION ---
@@ -293,24 +294,9 @@ def fetch_calibration_data(target_date_str):
 
     start_str, end_str = start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
 
-    url_gt = "https://archive-api.open-meteo.com/v1/archive"
-    params_gt = {
-        "latitude": LATITUDE, "longitude": LONGITUDE,
-        "start_date": start_str, "end_date": end_str,
-        "hourly": "temperature_2m", "timezone": "Europe/Berlin",
-    }
-    resp_gt = openmeteo.weather_api(url_gt, params=params_gt)[0].Hourly()
-    vals_gt = resp_gt.Variables(0).ValuesAsNumpy()
-    ts_gt = pd.to_datetime(np.arange(resp_gt.Time(), resp_gt.Time() + len(vals_gt) * resp_gt.Interval(),
-                                      resp_gt.Interval()), unit="s", utc=True).tz_convert("Europe/Berlin")
-    df_gt = pd.DataFrame({"dt": ts_gt, "temp": vals_gt})
-    df_gt["date"] = df_gt["dt"].dt.strftime("%Y-%m-%d")
-
-    actuals = {}
-    for d, grp in df_gt.groupby("date"):
-        daytime = grp[(grp["dt"].dt.hour >= 10) & (grp["dt"].dt.hour <= 19)]
-        if len(daytime) > 0:
-            actuals[d] = daytime["temp"].max()
+    # Fit the blend against the EDDM station max (what markets resolve
+    # on), so the bias term absorbs the grid-vs-station offset.
+    actuals = fetch_station_daily_max(start_str, end_str)
 
     url_m = "https://historical-forecast-api.open-meteo.com/v1/forecast"
     params_m = {
@@ -564,23 +550,19 @@ def settle_unsettled_markets():
         conn.close()
         return
 
-    for (t_date,) in unsettled_dates:
-        print(f"[Settlement] Fetching actual station weather for {t_date}...")
-        url = "https://archive-api.open-meteo.com/v1/archive"
-        params = {
-            "latitude": LATITUDE, "longitude": LONGITUDE,
-            "start_date": t_date, "end_date": t_date,
-            "hourly": "temperature_2m", "timezone": "Europe/Berlin",
-        }
+    dates = sorted(d for (d,) in unsettled_dates)
+    # Ground truth = EDDM METAR daily max, whole °C, local day -- the
+    # same thing Polymarket resolves on (Wunderground Daily
+    # Observations). NOT the Open-Meteo grid, which can be ~1°C off.
+    station_max = fetch_station_daily_max(dates[0], dates[-1], verbose=True)
+
+    for t_date in dates:
+        if t_date not in station_max:
+            print(f"[Settlement] No EDDM observations yet for {t_date} -- leaving unsettled")
+            continue
         try:
-            resp = openmeteo.weather_api(url, params=params)[0].Hourly()
-            vals = resp.Variables(0).ValuesAsNumpy()
-            ts = pd.to_datetime(np.arange(resp.Time(), resp.Time() + len(vals) * resp.Interval(),
-                                           resp.Interval()), unit="s", utc=True).tz_convert("Europe/Berlin")
-            df = pd.DataFrame({"dt": ts, "temp": vals})
-            daytime = df[(df["dt"].dt.hour >= 10) & (df["dt"].dt.hour <= 19)]
-            actual_temp = float(round(daytime["temp"].max(), 2))
-            print(f"[Settlement] Observed Peak Temp on {t_date}: {actual_temp}°C")
+            actual_temp = station_max[t_date]
+            print(f"[Settlement] EDDM observed max on {t_date}: {actual_temp}°C")
 
             cur.execute("""
                 SELECT id, bracket_label, model_prob FROM predictions

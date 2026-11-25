@@ -1,41 +1,48 @@
 name: Munich Weather Bot - Scheduled Logging
 
-# Two separate schedules matching the two logging cadences from db.py:
+# Schedules:
 #   - price snapshots every 15 minutes
-#   - full model run every 4 hours
+#   - full model run + settlement every 4 hours
+#   - lead-time calibration once a week (Monday 03:17 UTC)
 #
-# IMPORTANT LIMITATION, stated plainly: GitHub auto-disables scheduled
-# workflows on a repo after 60 days with NO commits/pushes to that
-# repo. If you go two months without touching this repo at all, the
-# schedule silently stops -- check the Actions tab occasionally, or
-# push any small commit (even just editing this comment) to reset the
-# clock. This is a GitHub platform limit, not something fixable in
-# the workflow file itself.
+# GitHub's cron is best-effort: in practice it skips most 15-minute runs.
+# For reliable 15-minute snapshots, trigger this workflow from outside
+# (e.g. cron-job.org calling the workflow_dispatch API with task=logging).
 #
-# Also note: GitHub's cron scheduler is best-effort, not exact -- jobs
-# can run a few minutes late during high load. Fine for this use case
-# (you're not doing sub-minute-precision trading), not fine if you
-# ever need guaranteed exact-time execution.
+# GitHub auto-disables scheduled workflows after 60 days without a push
+# to the repo. Check the Actions tab occasionally.
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 minutes -- price snapshots
-    - cron: "0 */4 * * *"    # every 4 hours -- full model run + settlement
-  workflow_dispatch: {}       # lets you manually trigger a run from the Actions tab, for testing
+    - cron: "*/15 * * * *"   # price snapshots
+    - cron: "0 */4 * * *"    # full model run + settlement
+    - cron: "17 3 * * 1"     # weekly lead-time calibration
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "What to run"
+        type: choice
+        default: logging
+        options:
+          - logging          # price snapshot + full run (same as the schedules)
+          - prices-only      # price snapshot only (use this for an external 15-min trigger)
+          - calibrate        # measure forecast error per horizon -> leadtime_calibration
+          - check-station    # compare EDDM station sources for the last 7 days (read-only)
 
 jobs:
   prices-only:
-    # Only actually do work on the 15-min schedule trigger; the 4h
-    # trigger below handles the full run. Both schedules fire this
-    # workflow, so each job checks which cron expression triggered it.
-    if: github.event.schedule == '*/15 * * * *' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event.schedule == '*/15 * * * *' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.task == 'logging' || inputs.task == 'prices-only'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run price snapshot
@@ -44,17 +51,44 @@ jobs:
         run: python3 munich_bot.py --prices-only
 
   full-run:
-    if: github.event.schedule == '0 */4 * * *' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event.schedule == '0 */4 * * *' ||
+      (github.event_name == 'workflow_dispatch' && inputs.task == 'logging')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run full model scan + settlement
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python3 munich_bot.py
+
+  maintenance:
+    if: >-
+      github.event.schedule == '17 3 * * 1' ||
+      (github.event_name == 'workflow_dispatch' &&
+       (inputs.task == 'calibrate' || inputs.task == 'check-station'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compare station sources
+        if: inputs.task == 'check-station'
+        run: python3 station_obs.py
+      - name: Measure lead-time calibration
+        if: github.event_name == 'schedule' || inputs.task == 'calibrate'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 Lead_Time_Sensitivity.py
