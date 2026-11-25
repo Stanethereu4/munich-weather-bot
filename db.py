@@ -66,9 +66,10 @@ DB_FILE = "weather_bot.db"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 # (horizon_days, sigma_c) measured with Lead_Time_Sensitivity.py on
-# 25 Nov 2026: Previous Runs API forecasts vs the EDDM station max
-# (whole °C, 366 days). Only used if leadtime_calibration is empty.
-FALLBACK_SIGMAS = [(0, 0.63), (1, 1.17), (2, 1.36), (3, 1.49)]
+# 25 Nov 2026 (after the full-day fix A1): Previous Runs API forecasts vs
+# the EDDM routine-METAR max (whole °C, 366 days, 22 Nov 2025-22 Nov 2026).
+# Only used if leadtime_calibration is empty.
+FALLBACK_SIGMAS = [(0, 0.58), (1, 1.15), (2, 1.35), (3, 1.50)]
 
 
 # ---------------------------------------------------------------------
@@ -316,7 +317,7 @@ def latest_leadtime_sigma(lead_time_hours: float) -> float:
         # not an invented number. The old 0.60C fallback was ~40% too
         # narrow at 48h and made the model systematically overconfident.
         print("[db] WARNING: no leadtime_calibration rows found -- using "
-              "measured fallback sigmas (0h 0.63, 24h 1.17, 48h 1.36, 72h 1.49 C).")
+              "measured fallback sigmas (0h 0.58, 24h 1.15, 48h 1.35, 72h 1.50 C).")
         rows = FALLBACK_SIGMAS
 
     target_days = lead_time_hours / 24.0
