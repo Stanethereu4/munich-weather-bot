@@ -219,6 +219,23 @@ def init_db():
         )
     """)
 
+    # B3 -- blend weights frozen for a whole Munich day (one row per day per
+    # market kind). Refitting on every run made the model probability move
+    # even when no new forecast had arrived.
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS blend_weights (
+            id {pk},
+            fit_date TEXT,             -- Munich calendar date the weights are used on
+            market_kind TEXT,          -- 'high' or 'low'
+            weights_json TEXT,         -- {{"model_key": weight, ...}}
+            bias_c REAL,
+            n_days INTEGER,            -- days in the fitting window
+            window_start TEXT,
+            window_end TEXT,
+            fitted_at_utc TEXT
+        )
+    """)
+
     _apply_migrations(cur, is_postgres)
 
     conn.commit()

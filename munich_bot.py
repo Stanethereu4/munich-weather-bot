@@ -400,7 +400,7 @@ def fetch_calibration_data(target_date_str, kind="high"):
     valid_dates = [d for d in sorted(actuals.keys()) if all(d in model_daily_max[m] for m in MODELS.keys())]
     y_tr = np.array([actuals[d] for d in valid_dates])
     X_tr = np.column_stack([[model_daily_max[m][d] for d in valid_dates] for m in MODELS.keys()])
-    return X_tr, y_tr
+    return X_tr, y_tr, (start_str, end_str)
 
 
 def discover_open_munich_events():
@@ -873,19 +873,12 @@ def run_scanner_for_all_open_events():
                   f"{type(e).__name__}: {str(e)[:200]}")
 
 
-def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=None, kind=None):
-    if kind is None:
-        kind = (pre_discovered_event or {}).get("kind", "high")
-    print("\n" + "=" * 105)
-    print(f" PHASE 5: POLYMARKET EDGE & KELLY POSITION SCANNER | TARGET DATE: {target_date_str} "
-          f"| {'HIGHEST' if kind == 'high' else 'LOWEST'} temperature")
-    print("=" * 105)
-    print(f"[*] Trading Parameters: Capital = ${BANKROLL:,.2f} | Risk = Quarter-Kelly ({KELLY_FRACTION:.2f}x) "
-          f"| Taker fee: per-market feeSchedule (fallback rate {DEFAULT_FEE_RATE})")
-
-    print(f"[*] Calibrating weights over prior {ROLLING_WINDOW_DAYS} days...")
-    X_tr, y_tr = fetch_calibration_data(target_date_str, kind)
-
+def fit_blend(X_tr, y_tr):
+    """
+    Finds the model weights (each 0-1, summing to 1) and a bias (-2..+2 °C)
+    that make  blend = sum(weight_i * forecast_i) + bias  miss the station
+    value by as little as possible (mean squared error) over the window.
+    """
     num_models = X_tr.shape[1]
     constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w[:num_models]) - 1.0})
     bounds = [(0.0, 1.0)] * num_models + [(-2.0, 2.0)]
@@ -896,8 +889,66 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
         return np.mean((y_tr - (np.dot(X_tr, w) + b)) ** 2)
 
     res = minimize(loss_func, initial_guess, method='SLSQP', bounds=bounds, constraints=constraints)
-    opt_w, opt_b = res.x[:num_models], res.x[num_models]
-    print(f"[*] Calibration Complete | ECMWF Weight: {opt_w[0]*100:.1f}% | Station Bias: {opt_b:+.2f} °C")
+    return res.x[:num_models], float(res.x[num_models])
+
+
+def get_daily_blend(kind):
+    """
+    B3: blend weights are fitted ONCE per Munich day and market kind, stored
+    in blend_weights, and reused by every run that day. Before, they were
+    refitted on every run, so the model probability could move with no new
+    forecast at all -- which would wreck any "how fast does the market
+    react to a new model run" measurement.
+    The fitting window (30 days ending 2 days ago) is the same for every
+    target date on a given day, so one fit per day covers all markets.
+    Returns (weights array in MODELS order, bias, 'stored' or 'fitted').
+    """
+    day = berlin_today().strftime("%Y-%m-%d")
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT weights_json, bias_c FROM blend_weights
+        WHERE fit_date = ? AND market_kind = ?
+        ORDER BY id ASC LIMIT 1
+    """, (day, kind))
+    row = cur.fetchone()
+    if row:
+        stored = json.loads(row[0])
+        if set(stored) == set(MODELS):          # same model list -> reuse
+            conn.close()
+            return np.array([stored[m] for m in MODELS]), float(row[1]), "stored"
+
+    X_tr, y_tr, (win_start, win_end) = fetch_calibration_data(day, kind)
+    w, b = fit_blend(X_tr, y_tr)
+    # Round once and use the rounded values everywhere, so the first run of
+    # the day computes exactly what every later run (reading the DB) will.
+    w, b = np.round(w, 6), round(b, 6)
+    cur.execute("""
+        INSERT INTO blend_weights (fit_date, market_kind, weights_json, bias_c, n_days,
+                                   window_start, window_end, fitted_at_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (day, kind, json.dumps({m: round(float(x), 6) for m, x in zip(MODELS, w)}), b,
+          int(len(y_tr)), win_start, win_end, utc_now_iso()))
+    conn.commit()
+    conn.close()
+    return w, b, "fitted"
+
+
+def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=None, kind=None):
+    if kind is None:
+        kind = (pre_discovered_event or {}).get("kind", "high")
+    print("\n" + "=" * 105)
+    print(f" PHASE 5: POLYMARKET EDGE & KELLY POSITION SCANNER | TARGET DATE: {target_date_str} "
+          f"| {'HIGHEST' if kind == 'high' else 'LOWEST'} temperature")
+    print("=" * 105)
+    print(f"[*] Trading Parameters: Capital = ${BANKROLL:,.2f} | Risk = Quarter-Kelly ({KELLY_FRACTION:.2f}x) "
+          f"| Taker fee: per-market feeSchedule (fallback rate {DEFAULT_FEE_RATE})")
+
+    # Blend weights: frozen for the whole Munich day (see get_daily_blend).
+    opt_w, opt_b, origin = get_daily_blend(kind)
+    weights_str = ", ".join(f"{m.split('_')[0]} {x*100:.0f}%" for m, x in zip(MODELS, opt_w))
+    print(f"[*] Blend weights ({origin} for {berlin_today()}, {kind}): {weights_str} | "
+          f"Station Bias: {opt_b:+.2f} °C")
 
     live_X, per_model_max, remaining_X = fetch_live_ensemble_forecast(target_date_str, kind)
     log_forecast_snapshot(target_date_str, per_model_max, kind)  # every run here; cron this at 3-6h cadence, not every scan
