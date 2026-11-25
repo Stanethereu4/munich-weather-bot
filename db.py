@@ -70,6 +70,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 # the EDDM routine-METAR max (whole °C, 366 days, 22 Nov 2025-22 Nov 2026).
 # Only used if leadtime_calibration is empty.
 FALLBACK_SIGMAS = [(0, 0.58), (1, 1.15), (2, 1.35), (3, 1.50)]
+FALLBACK_SIGMAS_BY_KIND = {"high": FALLBACK_SIGMAS, "low": None}   # 'low' filled in below once measured
 
 
 # ---------------------------------------------------------------------
@@ -266,7 +267,19 @@ NEW_COLUMNS = [
     ("predictions", "outcome_mismatch", "INTEGER"),   # 1 if station outcome != Polymarket outcome
     ("predictions", "fee_rate", "REAL"),              # taker fee rate used (market's feeSchedule)
     ("predictions", "observed_max_so_far", "REAL"),   # same-day only: EDDM routine-METAR max so far
+    # Lowest-temperature markets (added 25 Nov). market_kind = 'high' for
+    # "Highest temperature" markets, 'low' for "Lowest temperature" ones.
+    # Every row before this change is a 'high' row (backfilled below).
+    ("price_snapshots", "market_kind", "TEXT"),
+    ("orderbook_depth", "market_kind", "TEXT"),
+    ("predictions", "market_kind", "TEXT"),
+    ("forecast_snapshots", "market_kind", "TEXT"),
+    ("leadtime_calibration", "market_kind", "TEXT"),
+    ("predictions", "observed_min_so_far", "REAL"),   # same-day lows: EDDM routine-METAR min so far
 ]
+
+KIND_TABLES = ["price_snapshots", "orderbook_depth", "predictions",
+               "forecast_snapshots", "leadtime_calibration"]
 
 
 def _existing_columns(cur, table, is_postgres):
@@ -283,6 +296,10 @@ def _apply_migrations(cur, is_postgres):
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
             print(f"[db] migration: added {table}.{column}")
 
+    # Rows written before lows existed are all highs.
+    for table in KIND_TABLES:
+        cur.execute(f"UPDATE {table} SET market_kind = 'high' WHERE market_kind IS NULL")
+
     # A7 backfill: convert old x100 prices into the 0-1 column, once.
     cur.execute("""
         UPDATE price_snapshots SET gamma_price = polymarket_prob / 100.0
@@ -290,35 +307,31 @@ def _apply_migrations(cur, is_postgres):
     """)
 
 
-def latest_leadtime_sigma(lead_time_hours: float) -> float:
+def latest_leadtime_sigma(lead_time_hours: float, kind: str = "high") -> float:
     """
-    Reads the most recently computed sigma for the horizon closest to
-    lead_time_hours, interpolating between the two nearest measured
-    day-level horizons rather than snapping to whichever fabricated
-    bucket it happened to fall into.
-
-    Falls back to a conservative default (widest measured sigma, or
-    0.6C if no calibration has been run yet) if the table is empty --
-    loud enough to notice (prints a warning) rather than silently
-    reusing stale hardcoded numbers.
+    Reads the most recently computed sigma for this market kind ('high' =
+    daily max, 'low' = daily min; they have different forecast errors)
+    and interpolates between the two nearest measured day-level horizons.
+    Falls back to the measured values in FALLBACK_SIGMAS_BY_KIND (with a
+    printed warning) if the table has no rows for this kind yet.
     """
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("""
         SELECT horizon_days, sigma_c FROM leadtime_calibration
-        WHERE computed_at = (SELECT MAX(computed_at) FROM leadtime_calibration)
+        WHERE market_kind = ?
+          AND computed_at = (SELECT MAX(computed_at) FROM leadtime_calibration WHERE market_kind = ?)
         ORDER BY horizon_days
-    """)
+    """, (kind, kind))
     rows = cur.fetchall()
     conn.close()
 
     if not rows:
-        # Fallback = sigmas MEASURED via the Previous Runs API (Sept 2026),
-        # not an invented number. The old 0.60C fallback was ~40% too
-        # narrow at 48h and made the model systematically overconfident.
-        print("[db] WARNING: no leadtime_calibration rows found -- using "
-              "measured fallback sigmas (0h 0.58, 24h 1.15, 48h 1.35, 72h 1.50 C).")
-        rows = FALLBACK_SIGMAS
+        rows = FALLBACK_SIGMAS_BY_KIND.get(kind)
+        if rows is None:
+            raise RuntimeError(f"no sigma calibration for kind={kind!r}: run Lead_Time_Sensitivity.py")
+        print(f"[db] WARNING: no leadtime_calibration rows for kind={kind!r} -- using measured "
+              f"fallback sigmas {rows}.")
 
     target_days = lead_time_hours / 24.0
     horizons = [r[0] for r in rows]

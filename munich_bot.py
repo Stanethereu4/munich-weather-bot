@@ -12,8 +12,8 @@ import requests_cache
 from retry_requests import retry
 
 from db import init_db, get_connection, latest_leadtime_sigma
-from station_obs import fetch_daily_max as fetch_station_daily_max, observed_running_max
-from daymax import hourly_times_local, daily_max_by_date, daily_max_for
+from station_obs import fetch_daily_extreme as fetch_station_daily_extreme, observed_running_extreme
+from daymax import hourly_times_local, daily_extreme_by_date, daily_extreme_for
 from timeutil import utc_now_iso, berlin_now, berlin_today, hours_until_local_day_start, new_snapshot_id
 from kelly_multi import Candidate, solve_joint_kelly
 from http_session import TimeoutSession, TimeoutCachedSession
@@ -33,6 +33,17 @@ MIN_EDGE_THRESHOLD = 0.03   # 3% minimum net probability edge after fees
 # the fallback if a market doesn't publish one.
 DEFAULT_FEE_RATE = 0.01
 DEFAULT_FEE_EXPONENT = 1.0
+
+# MARKET KINDS
+# Polymarket runs two daily Munich temperature series with identical rules
+# (EDDM routine METARs, local day, whole °C rounded half up):
+#   'high' -> "Highest temperature in Munich on <date>?"  (daily max)
+#   'low'  -> "Lowest temperature in Munich on <date>?"   (daily min)
+# Lows trade 15-200x less (checked 25 Nov), so analyse them separately.
+MARKET_KINDS = {
+    "high": "highest-temperature-in-munich-on",
+    "low": "lowest-temperature-in-munich-on",
+}
 
 # CAPITAL & RISK PARAMETERS
 BANKROLL = 1000.0
@@ -61,16 +72,11 @@ openmeteo_hist = openmeteo_requests.Client(
                   retries=3, backoff_factor=0.3))
 
 
-def get_horizon_sigma(lead_time_hours):
-    """
-    REPLACES the hardcoded {0.53, 0.51, 0.46, 0.43} dict with a live
-    read from leadtime_calibration, populated by a REAL measurement in
-    Lead_Time_Sensitivity.py (Previous Runs API) instead of the old
-    fabricated linear scale factor. If that script hasn't been run
-    yet, this prints a loud warning and falls back to a conservative
-    default rather than silently trusting a stale number.
-    """
-    return latest_leadtime_sigma(lead_time_hours)
+def get_horizon_sigma(lead_time_hours, kind="high"):
+    """Measured forecast error (sigma, °C) at this lead time for this market
+    kind, from leadtime_calibration (filled by Lead_Time_Sensitivity.py).
+    Highs and lows have different errors, so each has its own rows."""
+    return latest_leadtime_sigma(lead_time_hours, kind)
 
 
 def parse_label_to_bounds(label):
@@ -100,7 +106,7 @@ def parse_label_to_bounds(label):
         return val - 0.5, val + 0.5
 
 
-def calculate_bracket_probability(mean_temp, sigma, bounds, observed_floor=None):
+def calculate_bracket_probability(mean_temp, sigma, bounds, observed_floor=None, observed_ceiling=None):
     """
     P(final daily max falls in the bracket), with the forecast max
     ~ Normal(mean_temp, sigma).
@@ -114,14 +120,25 @@ def calculate_bracket_probability(mean_temp, sigma, bounds, observed_floor=None)
       bracket 1°C  [0.5, 1.5] -> 0 (below what's already happened)
       bracket 2°C  [1.5, 2.5] -> Phi((2.5-1.0)/0.6) - 0 = 0.994
       bracket 3°C  [2.5, 3.5] -> Phi(4.17) - Phi(2.5) = 0.006
+
+    observed_ceiling (same-day LOW markets): the min already reported today.
+    The final value is min(observed, rest-of-day min), so it can never end
+    above the ceiling:
+        P(final <= t) = 1                       if t >= ceiling
+                      = Phi((t - mean) / sigma) otherwise
+    Example: -1°C already observed, rest of day forecast min 0.5 +/- 0.6.
+      bracket 0°C  [-0.5, 0.5] -> 1 - 1 = 0 (above what's already happened)
+      bracket -1°C [-1.5, -0.5] -> 1 - Phi((-1.5-0.5)/0.6) = 0.9996
     """
     def cdf(t):
         if t is None:
             return 1.0
         if observed_floor is not None and t < observed_floor:
             return 0.0
-        if mean_temp is None:            # nothing left to forecast: only the observation counts
+        if observed_ceiling is not None and t >= observed_ceiling:
             return 1.0
+        if mean_temp is None:            # nothing left to forecast: only the observation counts
+            return 0.0 if observed_ceiling is not None else 1.0
         return norm.cdf((t - mean_temp) / sigma)
 
     t_min, t_max = bounds
@@ -175,7 +192,10 @@ def decide_side_and_edge(model_prob, best_bid, best_ask,
     return "NO TRADE", best_edge, None, None
 
 
-def fetch_live_ensemble_forecast(target_date_str):
+def fetch_live_ensemble_forecast(target_date_str, kind="high"):
+    """Per-model forecast of the target day's max (kind='high') or min
+    ('low') over the full local day, plus the same over the hours still to
+    come (used for same-day markets; NaN if no hours remain)."""
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": LATITUDE, "longitude": LONGITUDE,
@@ -184,41 +204,42 @@ def fetch_live_ensemble_forecast(target_date_str):
         "timezone": "Europe/Berlin",
     }
     responses = openmeteo_live.weather_api(url, params=params)
-    live_maxes, remaining_maxes = [], []
-    per_model_max = {}
+    live_vals, remaining_vals = [], []
+    per_model = {}
     # Start of the current hour in Munich: hours from here on haven't been
     # observed yet. Only matters when the target day is today.
     hour_start = pd.Timestamp(berlin_now()).floor("h")
+    pick = np.max if kind == "high" else np.min
 
     for model_key, response in zip(MODELS.keys(), responses):
         hourly = response.Hourly()
         vals = hourly.Variables(0).ValuesAsNumpy()
         ts_local = hourly_times_local(hourly, len(vals))
         # Full local day (00:00-23:59), same as the market and the station truth.
-        m = daily_max_for(target_date_str, ts_local, vals)
-        live_maxes.append(m)
-        per_model_max[model_key] = float(m)
-        # Max over the hours of the target day still to come (NaN if none).
+        m = daily_extreme_for(target_date_str, ts_local, vals, kind)
+        live_vals.append(m)
+        per_model[model_key] = float(m)
+        # Extreme over the hours of the target day still to come (NaN if none).
         on_day = pd.DatetimeIndex(ts_local).strftime("%Y-%m-%d") == target_date_str
         rest = vals[on_day & (pd.DatetimeIndex(ts_local) >= hour_start)]
         rest = rest[~np.isnan(rest)]
-        remaining_maxes.append(float(rest.max()) if len(rest) else float("nan"))
+        remaining_vals.append(float(pick(rest)) if len(rest) else float("nan"))
 
-    return np.array(live_maxes), per_model_max, np.array(remaining_maxes)
+    return np.array(live_vals), per_model, np.array(remaining_vals)
 
 
-def log_forecast_snapshot(target_date_str, per_model_max):
-    """Logs raw per-model DETERMINISTIC forecasts -- call this every
-    3-6h, not every run, to match actual model-run cadence (see
-    db.py docstring)."""
+def log_forecast_snapshot(target_date_str, per_model_max, kind="high"):
+    """Logs raw per-model DETERMINISTIC forecasts of the daily extreme.
+    Note: the column is called daily_max_temp_c for historical reasons;
+    for market_kind='low' rows it holds the daily MIN."""
     conn = get_connection()
     cur = conn.cursor()
     ts = utc_now_iso()
     for model_key, val in per_model_max.items():
         cur.execute("""
-            INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c, ts_utc)
-            VALUES (?, ?, ?, ?)
-        """, (target_date_str, model_key, val, ts))
+            INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c, ts_utc, market_kind)
+            VALUES (?, ?, ?, ?, ?)
+        """, (target_date_str, model_key, val, ts, kind))
     conn.commit()
     conn.close()
 
@@ -268,6 +289,9 @@ ENSEMBLE_MODELS = {
 }
 
 
+_ENSEMBLE_LOGGED_THIS_RUN = set()   # target dates already logged in this process
+
+
 def fetch_and_log_all_ensemble_members(target_date_str):
     """
     Logs EVERY individual raw ensemble member (not just the blended
@@ -284,6 +308,12 @@ def fetch_and_log_all_ensemble_members(target_date_str):
     day that's already passed -- logging starts the clock on that,
     the live Gaussian pipeline doesn't need to change to benefit later.
     """
+    # The high and the low market of the same date share one ensemble
+    # fetch: each member's daily max AND min are logged from it, once.
+    if target_date_str in _ENSEMBLE_LOGGED_THIS_RUN:
+        return 0
+    _ENSEMBLE_LOGGED_THIS_RUN.add(target_date_str)
+
     url = "https://ensemble-api.open-meteo.com/v1/ensemble"
     params = {
         "latitude": LATITUDE, "longitude": LONGITUDE,
@@ -310,16 +340,18 @@ def fetch_and_log_all_ensemble_members(target_date_str):
 
         for i in range(num_members):
             vals = hourly.Variables(i).ValuesAsNumpy()
-            # Full local day; NaN if the member doesn't cover enough of it.
-            member_max = daily_max_for(target_date_str, hourly_times_local(hourly, len(vals)), vals)
-            if np.isnan(member_max):
-                continue
-            cur.execute("""
-                INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c, ts_utc)
-                VALUES (?, ?, ?, ?)
-            """, (target_date_str, f"{model_key}_member{i:02d}", member_max, ts))
-            total_logged += 1
-            model_logged += 1
+            ts_local = hourly_times_local(hourly, len(vals))
+            for kind in MARKET_KINDS:
+                # Full local day; NaN if the member doesn't cover enough of it.
+                v = daily_extreme_for(target_date_str, ts_local, vals, kind)
+                if np.isnan(v):
+                    continue
+                cur.execute("""
+                    INSERT INTO forecast_snapshots (target_date, model_key, daily_max_temp_c, ts_utc, market_kind)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (target_date_str, f"{model_key}_member{i:02d}", v, ts, kind))
+                total_logged += 1
+                model_logged += 1
 
         print(f"[ensemble-log]   {model_key} ({ENSEMBLE_MODELS[model_key]}): "
               f"{model_logged}/{num_members} members logged")
@@ -332,7 +364,7 @@ def fetch_and_log_all_ensemble_members(target_date_str):
     return total_logged
 
 
-def fetch_calibration_data(target_date_str):
+def fetch_calibration_data(target_date_str, kind="high"):
     now = berlin_now().replace(tzinfo=None)   # Munich calendar, naive for date maths below
     safe_end_dt = now - timedelta(days=2)
 
@@ -342,9 +374,9 @@ def fetch_calibration_data(target_date_str):
 
     start_str, end_str = start_dt.strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")
 
-    # Fit the blend against the EDDM station max (what markets resolve
+    # Fit the blend against the EDDM station max/min (what markets resolve
     # on), so the bias term absorbs the grid-vs-station offset.
-    actuals = fetch_station_daily_max(start_str, end_str)
+    actuals = fetch_station_daily_extreme(start_str, end_str, kind)
 
     url_m = "https://historical-forecast-api.open-meteo.com/v1/forecast"
     params_m = {
@@ -360,7 +392,7 @@ def fetch_calibration_data(target_date_str):
         hourly = response.Hourly()
         vals = hourly.Variables(0).ValuesAsNumpy()
         # Full local day per date; incomplete days (NaN) are left out.
-        per_day = daily_max_by_date(hourly_times_local(hourly, len(vals)), vals)
+        per_day = daily_extreme_by_date(hourly_times_local(hourly, len(vals)), vals, kind)
         model_daily_max[model_key] = {d: v for d, v in per_day.items() if not np.isnan(v)}
 
     valid_dates = [d for d in sorted(actuals.keys()) if all(d in model_daily_max[m] for m in MODELS.keys())]
@@ -399,25 +431,27 @@ def discover_open_munich_events():
     # slug instead, for every date a market could currently be open:
     # today through +3 days (markets open ~2 days ahead, and the
     # previous day's market can still be open in parallel).
-    events = []
+    events = []   # (kind, event) pairs
     today = berlin_today()   # markets are named after Munich local dates
-    for offset in range(0, 4):
-        d = today + timedelta(days=offset)
-        slug = f"highest-temperature-in-munich-on-{d.strftime('%B').lower()}-{d.day}-{d.year}"
-        try:
-            response = requests.get(url, headers=headers, params={"slug": slug}, timeout=15)
-            response.raise_for_status()
-            found = response.json()
-        except Exception as e:
-            print(f"[discovery] Failed to fetch {slug}: {e}")
-            continue
-        for ev in found or []:
-            if not ev.get("closed", False):
-                events.append(ev)
-    print(f"[discovery] {len(events)} open Munich event(s) found")
+    for kind, slug_prefix in MARKET_KINDS.items():
+        for offset in range(0, 4):
+            d = today + timedelta(days=offset)
+            slug = f"{slug_prefix}-{d.strftime('%B').lower()}-{d.day}-{d.year}"
+            try:
+                response = requests.get(url, headers=headers, params={"slug": slug}, timeout=15)
+                response.raise_for_status()
+                found = response.json()
+            except Exception as e:
+                print(f"[discovery] Failed to fetch {slug}: {e}")
+                continue
+            for ev in found or []:
+                if not ev.get("closed", False):
+                    events.append((kind, ev))
+    n_by_kind = {k: sum(1 for kk, _ in events if kk == k) for k in MARKET_KINDS}
+    print(f"[discovery] {len(events)} open Munich event(s) found {n_by_kind}")
 
     results = []
-    for event in events:
+    for kind, event in events:
         title = event.get("title", "")
         slug = event.get("slug", "")
         if "munich" not in title.lower():
@@ -453,7 +487,7 @@ def discover_open_munich_events():
 
         if brackets:
             results.append({
-                "event_slug": slug, "title": title,
+                "event_slug": slug, "title": title, "kind": kind,
                 "target_date": target_date, "brackets": brackets,
             })
 
@@ -521,7 +555,7 @@ def top_of_book(bids, asks, depth_window=0.05):
 
 
 def log_orderbook_depth(event_slug, question, bids, asks, token_id=None, bracket_label=None,
-                        snapshot_id=None, ts_utc=None):
+                        snapshot_id=None, ts_utc=None, kind="high"):
     """Logs every visible price level, not just top-of-book. Cadence:
     call this from the 15-min prices-only path -- see db.py docstring,
     this was upgraded from the original 'hourly to start' plan since
@@ -530,19 +564,19 @@ def log_orderbook_depth(event_slug, question, bids, asks, token_id=None, bracket
     conn = get_connection()
     cur = conn.cursor()
     rows = [(event_slug, question, side, float(level.get("price", 0)), float(level.get("size", 0)),
-             token_id, bracket_label, snapshot_id, ts_utc)
+             token_id, bracket_label, snapshot_id, ts_utc, kind)
             for side, levels in (("bid", bids), ("ask", asks)) for level in levels]
     if rows:
         cur.executemany("""
             INSERT INTO orderbook_depth (event_slug, market_question, side, price_level, size,
-                                         token_id, bracket_label, snapshot_id, ts_utc)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         token_id, bracket_label, snapshot_id, ts_utc, market_kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, rows)
     conn.commit()
     conn.close()
 
 
-def log_price_snapshot(event_slug, brackets, snapshot_id, ts_utc, books=None):
+def log_price_snapshot(event_slug, brackets, snapshot_id, ts_utc, books=None, kind="high"):
     """--prices-only path: one row per bracket, all sharing the same
     snapshot_id and UTC timestamp. All prices are probabilities 0-1:
     gamma_price = Gamma's displayed price (a midpoint), best_bid /
@@ -557,13 +591,13 @@ def log_price_snapshot(event_slug, brackets, snapshot_id, ts_utc, books=None):
             continue
         rows.append((event_slug, b["question"], label, b["token_id"], b["price"],
                      tob.get("best_bid"), tob.get("best_ask"), tob.get("mid"),
-                     tob.get("bid_depth_5c"), tob.get("ask_depth_5c"), snapshot_id, ts_utc))
+                     tob.get("bid_depth_5c"), tob.get("ask_depth_5c"), snapshot_id, ts_utc, kind))
     if rows:
         cur.executemany("""
             INSERT INTO price_snapshots (event_slug, market_question, bracket_label, token_id,
                                          gamma_price, best_bid, best_ask, mid,
-                                         bid_depth_5c, ask_depth_5c, snapshot_id, ts_utc)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                         bid_depth_5c, ask_depth_5c, snapshot_id, ts_utc, market_kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, rows)
     conn.commit()
     conn.close()
@@ -595,9 +629,10 @@ def run_prices_only_all_open_events():
                 books[label] = top_of_book(bids, asks)
                 log_orderbook_depth(event["event_slug"], b["question"], bids, asks,
                                     token_id=b["token_id"], bracket_label=label,
-                                    snapshot_id=snapshot_id, ts_utc=ts)
+                                    snapshot_id=snapshot_id, ts_utc=ts, kind=event["kind"])
 
-        n_prices = log_price_snapshot(event["event_slug"], event["brackets"], snapshot_id, ts, books)
+        n_prices = log_price_snapshot(event["event_slug"], event["brackets"], snapshot_id, ts, books,
+                                      kind=event["kind"])
 
         print(f"[prices-only] {event['event_slug']} (target_date={event['target_date']}): "
               f"logged {n_prices} price rows + depth for {len(event['brackets'])} brackets "
@@ -605,7 +640,7 @@ def run_prices_only_all_open_events():
 
 
 def log_predictions(target_date_str, event_slug, questions_by_label, rows,
-                     calibrated_mean, sigma, lead_time_hours, tokens_by_label=None):
+                     calibrated_mean, sigma, lead_time_hours, tokens_by_label=None, kind="high"):
     conn = get_connection()
     cur = conn.cursor()
     snapshot_id, ts = new_snapshot_id(), utc_now_iso()   # one id/time for this event's rows
@@ -617,19 +652,19 @@ def log_predictions(target_date_str, event_slug, questions_by_label, rows,
                 model_prob, market_price, net_edge, signal, kelly_fraction,
                 bet_amount, calibrated_mean_temp, sigma_used, lead_time_hours,
                 token_id, snapshot_id, ts_utc, best_bid, best_ask, entry_cost, fee_rate,
-                observed_max_so_far
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                observed_max_so_far, observed_min_so_far, market_kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             target_date_str, event_slug, questions_by_label.get(r["label"], r["label"]), r["label"],
             r["model_prob"], r["market_price"], r["net_edge"], r["signal"], r["kelly_fraction"],
             r["bet_amount"], calibrated_mean, sigma, lead_time_hours,
             tokens_by_label.get(r["label"]), snapshot_id, ts,
             r.get("best_bid"), r.get("best_ask"), r.get("entry_cost"), r.get("fee_rate"),
-            r.get("observed_max_so_far"),
+            r.get("observed_max_so_far"), r.get("observed_min_so_far"), kind,
         ))
     conn.commit()
     conn.close()
-    print(f"[DB] Logged {len(rows)} prediction rows for {target_date_str}")
+    print(f"[DB] Logged {len(rows)} prediction rows for {target_date_str} ({kind})")
 
 
 def _is_valid_whole_degree(value):
@@ -668,33 +703,39 @@ def settle_unsettled_markets():
 
 
 def settle_from_station():
+    """Station outcome per row, using the daily MAX for 'high' rows and the
+    daily MIN for 'low' rows. (The column is named actual_max_temp for
+    historical reasons; for low rows it holds the observed daily min.)"""
     conn = get_connection()
     cur = conn.cursor()
     today_str = berlin_today().strftime("%Y-%m-%d")   # only settle Munich days that are over
     cur.execute("""
-        SELECT DISTINCT target_date FROM predictions
+        SELECT DISTINCT target_date, market_kind FROM predictions
         WHERE settled = 0 AND target_date < ?
     """, (today_str,))
-    dates = sorted(d for (d,) in cur.fetchall())
-    if not dates:
+    pending = sorted((d, k or "high") for d, k in cur.fetchall())
+    if not pending:
         print("[Settlement] No past unsettled predictions found.")
         conn.close()
         return
 
-    station_max = fetch_station_daily_max(dates[0], dates[-1], verbose=True)
+    first, last = pending[0][0], max(d for d, _ in pending)
+    station = {kind: fetch_station_daily_extreme(first, last, kind, verbose=True)
+               for kind in sorted({k for _, k in pending})}
 
-    for t_date in dates:
-        actual_temp = station_max.get(t_date)
+    for t_date, kind in pending:
+        word = "max" if kind == "high" else "min"
+        actual_temp = station[kind].get(t_date)
         if not _is_valid_whole_degree(actual_temp):
-            print(f"[Settlement] No valid EDDM max for {t_date} (got {actual_temp!r}) -- leaving unsettled")
+            print(f"[Settlement] No valid EDDM {word} for {t_date} (got {actual_temp!r}) -- leaving unsettled")
             continue
         actual_temp = int(actual_temp)
-        print(f"[Settlement] EDDM routine-METAR max on {t_date}: {actual_temp}°C")
+        print(f"[Settlement] EDDM routine-METAR {word} on {t_date}: {actual_temp}°C")
 
         cur.execute("""
             SELECT id, bracket_label, model_prob FROM predictions
-            WHERE target_date = ? AND settled = 0
-        """, (t_date,))
+            WHERE target_date = ? AND settled = 0 AND COALESCE(market_kind, 'high') = ?
+        """, (t_date, kind))
         for row_id, label, model_prob in cur.fetchall():
             outcome = _bracket_outcome(label, actual_temp)
             brier = (model_prob - outcome) ** 2
@@ -704,7 +745,7 @@ def settle_from_station():
                 WHERE id = ?
             """, (actual_temp, outcome, round(brier, 4), row_id))
         conn.commit()
-        print(f"[Settlement] Settled all rows for {t_date}")
+        print(f"[Settlement] Settled all {kind} rows for {t_date}")
     conn.close()
 
 
@@ -830,15 +871,18 @@ def run_scanner_for_all_open_events():
                   f"{type(e).__name__}: {str(e)[:200]}")
 
 
-def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=None):
+def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=None, kind=None):
+    if kind is None:
+        kind = (pre_discovered_event or {}).get("kind", "high")
     print("\n" + "=" * 105)
-    print(f" PHASE 5: POLYMARKET EDGE & KELLY POSITION SCANNER | TARGET DATE: {target_date_str}")
+    print(f" PHASE 5: POLYMARKET EDGE & KELLY POSITION SCANNER | TARGET DATE: {target_date_str} "
+          f"| {'HIGHEST' if kind == 'high' else 'LOWEST'} temperature")
     print("=" * 105)
     print(f"[*] Trading Parameters: Capital = ${BANKROLL:,.2f} | Risk = Quarter-Kelly ({KELLY_FRACTION:.2f}x) "
           f"| Taker fee: per-market feeSchedule (fallback rate {DEFAULT_FEE_RATE})")
 
     print(f"[*] Calibrating weights over prior {ROLLING_WINDOW_DAYS} days...")
-    X_tr, y_tr = fetch_calibration_data(target_date_str)
+    X_tr, y_tr = fetch_calibration_data(target_date_str, kind)
 
     num_models = X_tr.shape[1]
     constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w[:num_models]) - 1.0})
@@ -853,8 +897,8 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
     opt_w, opt_b = res.x[:num_models], res.x[num_models]
     print(f"[*] Calibration Complete | ECMWF Weight: {opt_w[0]*100:.1f}% | Station Bias: {opt_b:+.2f} °C")
 
-    live_X, per_model_max, remaining_X = fetch_live_ensemble_forecast(target_date_str)
-    log_forecast_snapshot(target_date_str, per_model_max)  # every run here; cron this at 3-6h cadence, not every scan
+    live_X, per_model_max, remaining_X = fetch_live_ensemble_forecast(target_date_str, kind)
+    log_forecast_snapshot(target_date_str, per_model_max, kind)  # every run here; cron this at 3-6h cadence, not every scan
     fetch_and_log_all_ensemble_members(target_date_str)     # raw member logging -- additive, doesn't feed live prediction
 
     if np.isnan(live_X).any():
@@ -864,32 +908,38 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
         return
 
     calibrated_mean = np.dot(live_X, opt_w) + opt_b
-    sigma = get_horizon_sigma(lead_time_hours)  # measured, from leadtime_calibration
-    print(f"[*] Live Forecast Peak: {calibrated_mean:.2f} °C (Horizon: {lead_time_hours:.1f}h, "
-          f"Measured Sigma: {sigma:.2f} °C)")
+    sigma = get_horizon_sigma(lead_time_hours, kind)  # measured per kind, from leadtime_calibration
+    print(f"[*] Live Forecast {'Peak' if kind == 'high' else 'Low'}: {calibrated_mean:.2f} °C "
+          f"(Horizon: {lead_time_hours:.1f}h, Measured Sigma: {sigma:.2f} °C)")
 
-    # Same-day markets: part of the day has already happened. The final
-    # max = max(observed so far, max of the remaining hours), so we use the
-    # official routine-METAR running max as a floor and forecast only the
-    # hours still to come (see calculate_bracket_probability).
-    observed_floor = None
+    # Same-day markets: part of the day has already happened.
+    #   high: final max = max(observed so far, max of remaining hours) -> observed max is a FLOOR
+    #   low:  final min = min(observed so far, min of remaining hours) -> observed min is a CEILING
+    # We use the official routine-METAR running extreme and forecast only
+    # the hours still to come (see calculate_bracket_probability).
+    observed_floor = observed_ceiling = None
     forecast_mean_for_probs = calibrated_mean
     if target_date_str == berlin_today().strftime("%Y-%m-%d"):
         try:
-            obs = observed_running_max(berlin_today())
+            obs = observed_running_extreme(berlin_today(), kind)
         except Exception as e:
             obs = None
             print(f"[same-day] could not read today's METARs ({e}) -- using full-day forecast only")
         if obs is not None:
-            observed_floor, n_reports, last_time = obs
+            observed, n_reports, last_time = obs
+            word = "max" if kind == "high" else "min"
+            if kind == "high":
+                observed_floor = observed
+            else:
+                observed_ceiling = observed
             if np.isnan(remaining_X).any():
                 forecast_mean_for_probs = None   # no hours left: the observation decides
-                print(f"[same-day] observed max so far {observed_floor}°C ({n_reports} reports, "
+                print(f"[same-day] observed {word} so far {observed}°C ({n_reports} reports, "
                       f"last {last_time:%H:%M}); no forecast hours left")
             else:
                 forecast_mean_for_probs = float(np.dot(remaining_X, opt_w) + opt_b)
-                print(f"[same-day] observed max so far {observed_floor}°C ({n_reports} reports, "
-                      f"last {last_time:%H:%M}); rest-of-day forecast max {forecast_mean_for_probs:.2f}°C")
+                print(f"[same-day] observed {word} so far {observed}°C ({n_reports} reports, "
+                      f"last {last_time:%H:%M}); rest-of-day forecast {word} {forecast_mean_for_probs:.2f}°C")
 
     print("\n[*] Fetching Polymarket order book...")
     if pre_discovered_event is not None:
@@ -907,7 +957,7 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
     else:
         # Fallback path if called directly without discovery (e.g. manual testing).
         matches = [e for e in discover_open_munich_events()
-                   if e["target_date"] is not None
+                   if e["target_date"] is not None and e["kind"] == kind
                    and e["target_date"].strftime("%Y-%m-%d") == target_date_str]
         if not matches:
             market_prices, questions_by_label, event_slug, error_msg = None, None, None, \
@@ -940,7 +990,7 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
         bounds_tuple = parse_label_to_bounds(label)
         if bounds_tuple[0] is not None or bounds_tuple[1] is not None:
             model_probs[label] = calculate_bracket_probability(
-                forecast_mean_for_probs, sigma, bounds_tuple, observed_floor)
+                forecast_mean_for_probs, sigma, bounds_tuple, observed_floor, observed_ceiling)
 
     print("\n" + "-" * 105)
     print(f" {'Bracket':<18} | {'Model P':<8} | {'Mid':<7} | {'Bid/Ask':<11} | {'Net Edge':<9} | {'Signal':<15} | {'Kelly Rec ($)':<14}")
@@ -1007,8 +1057,9 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
     # could ever answer "is there a real edge here".
     for r in log_rows:
         r["observed_max_so_far"] = observed_floor
+        r["observed_min_so_far"] = observed_ceiling
     log_predictions(target_date_str, event_slug, questions_by_label, log_rows,
-                     calibrated_mean, sigma, lead_time_hours, tokens_by_label)
+                     calibrated_mean, sigma, lead_time_hours, tokens_by_label, kind)
 
 
 if __name__ == "__main__":
