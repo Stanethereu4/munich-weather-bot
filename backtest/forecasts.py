@@ -31,6 +31,7 @@ import pandas as pd
 import requests
 
 from backtest.config import MODELS, RUN_HOURS_UTC, FIRST_RUN, LAT, LON
+from backtest.timeconv import to_unix_seconds
 
 URL = "https://single-runs-api.open-meteo.com/v1/forecast"
 HEADERS = {"User-Agent": "munich-weather-bot backtest (research)"}
@@ -59,7 +60,7 @@ def _get(params, tries=6):
 
 
 def _frame(h, model, col, init):
-    t = pd.to_datetime(h["time"], utc=True).astype("int64") // 10**9
+    t = to_unix_seconds(pd.Series(h["time"])).to_numpy()
     df = pd.DataFrame({"t": t, "temp": h[col]})
     df["model"], df["init"] = model, int(init.timestamp())
     return df.dropna(subset=["temp"])[["model", "init", "t", "temp"]]
@@ -123,6 +124,12 @@ def main():
         path = os.path.join(OUT, f"runs_{month}.parquet")
         have = pd.read_parquet(path) if os.path.exists(path) else pd.DataFrame(
             columns=["model", "init", "t", "temp"])
+        if len(have) and have["t"].max() < 10**9:
+            # written by the first version (pandas-3 unit bug: t was seconds/1000,
+            # floored). Times are on the hour and the error is < 1000 s, so
+            # rounding t*1000 to the nearest hour restores them exactly.
+            have["t"] = ((have["t"] * 1000 + 1800) // 3600 * 3600).astype("int64")
+            print(f"{month}: repaired timestamps of {len(have)} existing rows")
         # a run counts as done when all blend models are in, or it was marked not archived
         per_init = have.groupby("init")["model"].nunique() if len(have) else pd.Series(dtype=int)
         todo = [i for i in month_inits

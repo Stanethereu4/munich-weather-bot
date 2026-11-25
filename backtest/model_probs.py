@@ -37,6 +37,7 @@ import pandas as pd
 
 from backtest.config import MODELS, AVAILABILITY_DELAY_HOURS, SIGMA, BLEND_WINDOW_DAYS
 from blendfit import fit_blend
+from backtest.timeconv import to_unix_seconds
 from munich_bot import parse_label_to_bounds, calculate_bracket_probability
 
 DATA = "backtest_data"
@@ -146,7 +147,7 @@ def main():
 
     ev = (markets.groupby(["kind", "target_date", "event_slug"])
           .agg(start=("market_start", "first")).reset_index())
-    ev["open_ts"] = pd.to_datetime(ev["start"], utc=True).astype("int64") // 10**9
+    ev["open_ts"] = to_unix_seconds(ev["start"])
     ev["day_start"] = ev["target_date"].map(local_midnight_ts)
     brackets = markets.groupby("event_slug")[["bracket_label", "yes_token", "won"]].apply(
         lambda d: d.to_dict("records")).to_dict()
