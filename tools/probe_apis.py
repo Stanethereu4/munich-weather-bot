@@ -85,7 +85,7 @@ if "gamma-lowest" in probes:
     # patterns for recent and upcoming dates, then print rules + brackets.
     section("GAMMA lowest-temperature markets for Munich")
     found = None
-    for d in [today + timedelta(days=k) for k in (1, 0, -1, -3, -10)]:
+    for d in [date.today() + timedelta(days=k) for k in (1, 0, -1, -3, -10)]:
         for pat in ("lowest-temperature-in-munich-on-{m}-{d}-{y}", "minimum-temperature-in-munich-on-{m}-{d}-{y}"):
             slug = pat.format(m=d.strftime('%B').lower(), d=d.day, y=d.year)
             r = requests.get(f"{GAMMA}/events", params={"slug": slug}, headers=H, timeout=20).json()
