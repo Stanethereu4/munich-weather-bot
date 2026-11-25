@@ -365,15 +365,27 @@ def discover_open_munich_events():
                       "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         "Accept": "application/json",
     }
-    params = {"search": "highest temperature in munich", "closed": "false", "limit": 20}
-
-    try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        response.raise_for_status()
-        events = response.json()
-    except Exception as e:
-        print(f"[discovery] Failed to fetch open Munich events: {e}")
-        return []
+    # Gamma's /events endpoint IGNORES a "search" param (it silently
+    # returns unrelated open events), so look events up by their exact
+    # slug instead, for every date a market could currently be open:
+    # today through +3 days (markets open ~2 days ahead, and the
+    # previous day's market can still be open in parallel).
+    events = []
+    today = datetime.now().date()
+    for offset in range(0, 4):
+        d = today + timedelta(days=offset)
+        slug = f"highest-temperature-in-munich-on-{d.strftime('%B').lower()}-{d.day}-{d.year}"
+        try:
+            response = requests.get(url, headers=headers, params={"slug": slug}, timeout=15)
+            response.raise_for_status()
+            found = response.json()
+        except Exception as e:
+            print(f"[discovery] Failed to fetch {slug}: {e}")
+            continue
+        for ev in found or []:
+            if not ev.get("closed", False):
+                events.append(ev)
+    print(f"[discovery] {len(events)} open Munich event(s) found")
 
     results = []
     for event in events:
