@@ -46,6 +46,7 @@ from retry_requests import retry
 from db import init_db, get_connection
 from station_obs import fetch_daily_max as fetch_station_daily_max
 from daymax import hourly_times_local, daily_max_by_date
+from http_session import TimeoutCachedSession
 
 # --- CONFIGURATION ---
 LATITUDE = 48.3537
@@ -69,7 +70,7 @@ MODELS = {
     "meteofrance_seamless": "Météo-France",
 }
 
-cache_session = requests_cache.CachedSession('.cache_leadtime_real', expire_after=86400)
+cache_session = TimeoutCachedSession('.cache_leadtime_real', expire_after=86400)  # default timeout, see http_session.py
 retry_session = retry(cache_session, retries=5, backoff_factor=0.3)
 openmeteo = openmeteo_requests.Client(session=retry_session)
 

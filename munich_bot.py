@@ -16,6 +16,7 @@ from station_obs import fetch_daily_max as fetch_station_daily_max, observed_run
 from daymax import hourly_times_local, daily_max_by_date, daily_max_for
 from timeutil import utc_now_iso, berlin_now, berlin_today, hours_until_local_day_start, new_snapshot_id
 from kelly_multi import Candidate, solve_joint_kelly
+from http_session import TimeoutSession, TimeoutCachedSession
 
 # --- CONFIGURATION ---
 LATITUDE = 48.3537   # Munich Airport (EDDM)
@@ -51,10 +52,12 @@ MODELS = {
 #    wreck any timing analysis ("when did our model react to a new run?").
 #  - openmeteo_hist: cached for 1 hour. Historical data (30-day blend
 #    calibration) doesn't change between runs, so caching only saves calls.
+# Both sessions apply a default timeout (http_session.py): without one, a
+# stalled Open-Meteo call blocked the whole run indefinitely.
 openmeteo_live = openmeteo_requests.Client(
-    session=retry(requests.Session(), retries=3, backoff_factor=0.3))
+    session=retry(TimeoutSession(), retries=3, backoff_factor=0.3))
 openmeteo_hist = openmeteo_requests.Client(
-    session=retry(requests_cache.CachedSession('.cache_phase5_kelly', expire_after=3600),
+    session=retry(TimeoutCachedSession('.cache_phase5_kelly', expire_after=3600),
                   retries=3, backoff_factor=0.3))
 
 
