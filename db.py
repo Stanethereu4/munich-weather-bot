@@ -264,6 +264,7 @@ NEW_COLUMNS = [
     ("predictions", "pm_winning_bracket", "TEXT"),
     ("predictions", "outcome_mismatch", "INTEGER"),   # 1 if station outcome != Polymarket outcome
     ("predictions", "fee_rate", "REAL"),              # taker fee rate used (market's feeSchedule)
+    ("predictions", "observed_max_so_far", "REAL"),   # same-day only: EDDM routine-METAR max so far
 ]
 
 

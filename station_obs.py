@@ -152,6 +152,20 @@ def fetch_daily_max(start, end, verbose=False):
     return result
 
 
+def observed_running_max(day: date):
+    """
+    For a day that is still in progress: the qualifying max so far
+    (routine METARs only, local date, rounded half up), from AWC.
+    Returns (max_whole_degrees, n_reports, last_report_local_time) or
+    None if nothing has been reported yet. No completeness check here --
+    the day isn't over, that's the point.
+    """
+    df = fetch_awc_day(day).dropna(subset=["temp_c"])
+    if df.empty:
+        return None
+    return _round_half_up(df["temp_c"].max()), len(df), df["local_dt"].max()
+
+
 def _compare_sources(days=7):
     """Diagnostic: IEM vs AWC vs Open-Meteo grid for recent days."""
     end = date.today() - timedelta(days=1)

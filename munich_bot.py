@@ -12,7 +12,7 @@ import requests_cache
 from retry_requests import retry
 
 from db import init_db, get_connection, latest_leadtime_sigma
-from station_obs import fetch_daily_max as fetch_station_daily_max
+from station_obs import fetch_daily_max as fetch_station_daily_max, observed_running_max
 from daymax import hourly_times_local, daily_max_by_date, daily_max_for
 from timeutil import utc_now_iso, berlin_now, berlin_today, hours_until_local_day_start, new_snapshot_id
 from kelly_multi import Candidate, solve_joint_kelly
@@ -97,14 +97,33 @@ def parse_label_to_bounds(label):
         return val - 0.5, val + 0.5
 
 
-def calculate_bracket_probability(mean_temp, sigma, bounds):
+def calculate_bracket_probability(mean_temp, sigma, bounds, observed_floor=None):
+    """
+    P(final daily max falls in the bracket), with the forecast max
+    ~ Normal(mean_temp, sigma).
+
+    observed_floor (same-day markets only): the max ALREADY reported today,
+    in whole degrees. The final value is max(observed, rest-of-day max),
+    so it can never end below the floor:
+        P(final <= t) = 0                      if t < floor
+                      = Phi((t - mean) / sigma) otherwise
+    Example: 2°C already observed, rest of day forecast 1.0 +/- 0.6.
+      bracket 1°C  [0.5, 1.5] -> 0 (below what's already happened)
+      bracket 2°C  [1.5, 2.5] -> Phi((2.5-1.0)/0.6) - 0 = 0.994
+      bracket 3°C  [2.5, 3.5] -> Phi(4.17) - Phi(2.5) = 0.006
+    """
+    def cdf(t):
+        if t is None:
+            return 1.0
+        if observed_floor is not None and t < observed_floor:
+            return 0.0
+        if mean_temp is None:            # nothing left to forecast: only the observation counts
+            return 1.0
+        return norm.cdf((t - mean_temp) / sigma)
+
     t_min, t_max = bounds
-    if t_min is None:
-        return norm.cdf((t_max - mean_temp) / sigma)
-    elif t_max is None:
-        return 1.0 - norm.cdf((t_min - mean_temp) / sigma)
-    else:
-        return norm.cdf((t_max - mean_temp) / sigma) - norm.cdf((t_min - mean_temp) / sigma)
+    lower = 0.0 if t_min is None else cdf(t_min)
+    return max(0.0, cdf(t_max) - lower)
 
 
 def taker_fee_per_share(price, fee_rate=DEFAULT_FEE_RATE, exponent=DEFAULT_FEE_EXPONENT):
@@ -162,18 +181,27 @@ def fetch_live_ensemble_forecast(target_date_str):
         "timezone": "Europe/Berlin",
     }
     responses = openmeteo_live.weather_api(url, params=params)
-    live_maxes = []
+    live_maxes, remaining_maxes = [], []
     per_model_max = {}
+    # Start of the current hour in Munich: hours from here on haven't been
+    # observed yet. Only matters when the target day is today.
+    hour_start = pd.Timestamp(berlin_now()).floor("h")
 
     for model_key, response in zip(MODELS.keys(), responses):
         hourly = response.Hourly()
         vals = hourly.Variables(0).ValuesAsNumpy()
+        ts_local = hourly_times_local(hourly, len(vals))
         # Full local day (00:00-23:59), same as the market and the station truth.
-        m = daily_max_for(target_date_str, hourly_times_local(hourly, len(vals)), vals)
+        m = daily_max_for(target_date_str, ts_local, vals)
         live_maxes.append(m)
         per_model_max[model_key] = float(m)
+        # Max over the hours of the target day still to come (NaN if none).
+        on_day = pd.DatetimeIndex(ts_local).strftime("%Y-%m-%d") == target_date_str
+        rest = vals[on_day & (pd.DatetimeIndex(ts_local) >= hour_start)]
+        rest = rest[~np.isnan(rest)]
+        remaining_maxes.append(float(rest.max()) if len(rest) else float("nan"))
 
-    return np.array(live_maxes), per_model_max
+    return np.array(live_maxes), per_model_max, np.array(remaining_maxes)
 
 
 def log_forecast_snapshot(target_date_str, per_model_max):
@@ -585,14 +613,16 @@ def log_predictions(target_date_str, event_slug, questions_by_label, rows,
                 target_date, event_slug, market_question, bracket_label,
                 model_prob, market_price, net_edge, signal, kelly_fraction,
                 bet_amount, calibrated_mean_temp, sigma_used, lead_time_hours,
-                token_id, snapshot_id, ts_utc, best_bid, best_ask, entry_cost, fee_rate
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                token_id, snapshot_id, ts_utc, best_bid, best_ask, entry_cost, fee_rate,
+                observed_max_so_far
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             target_date_str, event_slug, questions_by_label.get(r["label"], r["label"]), r["label"],
             r["model_prob"], r["market_price"], r["net_edge"], r["signal"], r["kelly_fraction"],
             r["bet_amount"], calibrated_mean, sigma, lead_time_hours,
             tokens_by_label.get(r["label"]), snapshot_id, ts,
             r.get("best_bid"), r.get("best_ask"), r.get("entry_cost"), r.get("fee_rate"),
+            r.get("observed_max_so_far"),
         ))
     conn.commit()
     conn.close()
@@ -815,7 +845,7 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
     opt_w, opt_b = res.x[:num_models], res.x[num_models]
     print(f"[*] Calibration Complete | ECMWF Weight: {opt_w[0]*100:.1f}% | Station Bias: {opt_b:+.2f} °C")
 
-    live_X, per_model_max = fetch_live_ensemble_forecast(target_date_str)
+    live_X, per_model_max, remaining_X = fetch_live_ensemble_forecast(target_date_str)
     log_forecast_snapshot(target_date_str, per_model_max)  # every run here; cron this at 3-6h cadence, not every scan
     fetch_and_log_all_ensemble_members(target_date_str)     # raw member logging -- additive, doesn't feed live prediction
 
@@ -826,9 +856,32 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
         return
 
     calibrated_mean = np.dot(live_X, opt_w) + opt_b
-    sigma = get_horizon_sigma(lead_time_hours)  # NOW REAL, from leadtime_calibration
-    print(f"[*] Live Forecast Peak: {calibrated_mean:.2f} °C (Horizon: {lead_time_hours}h, "
+    sigma = get_horizon_sigma(lead_time_hours)  # measured, from leadtime_calibration
+    print(f"[*] Live Forecast Peak: {calibrated_mean:.2f} °C (Horizon: {lead_time_hours:.1f}h, "
           f"Measured Sigma: {sigma:.2f} °C)")
+
+    # Same-day markets: part of the day has already happened. The final
+    # max = max(observed so far, max of the remaining hours), so we use the
+    # official routine-METAR running max as a floor and forecast only the
+    # hours still to come (see calculate_bracket_probability).
+    observed_floor = None
+    forecast_mean_for_probs = calibrated_mean
+    if target_date_str == berlin_today().strftime("%Y-%m-%d"):
+        try:
+            obs = observed_running_max(berlin_today())
+        except Exception as e:
+            obs = None
+            print(f"[same-day] could not read today's METARs ({e}) -- using full-day forecast only")
+        if obs is not None:
+            observed_floor, n_reports, last_time = obs
+            if np.isnan(remaining_X).any():
+                forecast_mean_for_probs = None   # no hours left: the observation decides
+                print(f"[same-day] observed max so far {observed_floor}°C ({n_reports} reports, "
+                      f"last {last_time:%H:%M}); no forecast hours left")
+            else:
+                forecast_mean_for_probs = float(np.dot(remaining_X, opt_w) + opt_b)
+                print(f"[same-day] observed max so far {observed_floor}°C ({n_reports} reports, "
+                      f"last {last_time:%H:%M}); rest-of-day forecast max {forecast_mean_for_probs:.2f}°C")
 
     print("\n[*] Fetching Polymarket order book...")
     if pre_discovered_event is not None:
@@ -878,7 +931,8 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
     for label in market_prices.keys():
         bounds_tuple = parse_label_to_bounds(label)
         if bounds_tuple[0] is not None or bounds_tuple[1] is not None:
-            model_probs[label] = calculate_bracket_probability(calibrated_mean, sigma, bounds_tuple)
+            model_probs[label] = calculate_bracket_probability(
+                forecast_mean_for_probs, sigma, bounds_tuple, observed_floor)
 
     print("\n" + "-" * 105)
     print(f" {'Bracket':<18} | {'Model P':<8} | {'Mid':<7} | {'Bid/Ask':<11} | {'Net Edge':<9} | {'Signal':<15} | {'Kelly Rec ($)':<14}")
@@ -943,6 +997,8 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
     # THIS is the restored piece -- every run now persists, instead of
     # printing to a terminal and discarding the only evidence that
     # could ever answer "is there a real edge here".
+    for r in log_rows:
+        r["observed_max_so_far"] = observed_floor
     log_predictions(target_date_str, event_slug, questions_by_label, log_rows,
                      calibrated_mean, sigma, lead_time_hours, tokens_by_label)
 
