@@ -883,8 +883,10 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
             continue
         signal, net_edge, side, cost = decide_side_and_edge(
             mod_p, tob.get("best_bid"), tob.get("best_ask"), POLYMARKET_THETA)
-        mid = tob.get("mid") if tob.get("mid") is not None else gamma_price
-        decisions[label] = {"model_prob": mod_p, "market_price": mid,
+        # Midpoint only exists if BOTH sides have orders. With one side empty
+        # Gamma still shows a "price" (e.g. half of a lone 0.13 ask = 0.065),
+        # which is not a real market probability -- log None instead.
+        decisions[label] = {"model_prob": mod_p, "market_price": tob.get("mid"),
                              "best_bid": tob.get("best_bid"), "best_ask": tob.get("best_ask"),
                              "signal": signal, "net_edge": net_edge, "side": side, "cost": cost}
 
@@ -906,7 +908,8 @@ def run_phase5_scanner(target_date_str, lead_time_hours, pre_discovered_event=No
         pos_str = f"${bet_amount:>6.2f} ({kelly_frac*100:>4.1f}%)" if bet_amount > 0 else "$0.00 (0.0%)"
         ba = (f"{d['best_bid'] if d['best_bid'] is not None else '-'}/"
               f"{d['best_ask'] if d['best_ask'] is not None else '-'}")
-        print(f" {label:<18} | {d['model_prob']*100:>6.1f}% | {d['market_price']*100:>5.1f}% | {ba:<11} | "
+        mid_str = f"{d['market_price']*100:>5.1f}%" if d["market_price"] is not None else f"{'-':>6}"
+        print(f" {label:<18} | {d['model_prob']*100:>6.1f}% | {mid_str} | {ba:<11} | "
               f"{d['net_edge']*100:>+7.1f}% | {d['signal']:<15} | {pos_str}")
 
         log_rows.append({
