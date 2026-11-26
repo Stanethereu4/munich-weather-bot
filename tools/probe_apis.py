@@ -473,6 +473,38 @@ if "trades-shape2" in probes:
             r = requests.get(f"{base}/{ep}", params=params, headers=H, timeout=60)
             print(f"\n{base}/{ep} -> {r.status_code}: {r.text[:450]}")
 
+if "cities" in probes:
+    # Low-volume cities: series -> event slugs, history depth, bracket labels, resolution station
+    import re
+    section("Cities: series, history, labels, station")
+    cities = ["toronto", "panama-city", "istanbul", "chicago", "cape-town", "mexico-city", "sao-paulo",
+              "seattle", "warsaw", "denver"]
+    for c in cities:
+        for kind, sslug in (("high", f"{c}-daily-weather"), ("low", f"{c}-daily-lowest-temperature")):
+            try:
+                r = requests.get(f"{GAMMA}/series", params={"slug": sslug}, headers=H, timeout=30)
+                j = r.json()
+            except Exception as e:
+                print(f"{c} {kind}: series error {type(e).__name__}"); continue
+            if not j:
+                print(f"{c} {kind}: no series '{sslug}'"); continue
+            evs = j[0].get("events") or []
+            slugs = sorted((e.get("slug"), e.get("closed"), e.get("volume")) for e in evs)
+            closed = [e for e in evs if e.get("closed")]
+            dates = sorted(e.get("endDate", "")[:10] for e in evs)
+            print(f"{c} {kind}: series ok, {len(evs)} events ({len(closed)} closed), dates {dates[0] if dates else None}..{dates[-1] if dates else None}")
+            if evs:
+                ex = sorted(closed or evs, key=lambda e: e.get("endDate", ""))[-1]
+                print(f"   example slug: {ex.get('slug')}  volume {ex.get('volume')}")
+                ev = requests.get(f"{GAMMA}/events", params={"slug": ex["slug"]}, headers=H, timeout=30).json()[0]
+                labels = [m.get("groupItemTitle") for m in ev["markets"]]
+                print(f"   labels: {labels}")
+                desc = ev.get("description") or ""
+                st = re.findall(r"(?:station|Station|airport|Airport)[^.]{0,140}", desc)
+                url = re.findall(r"https?://\S+", desc)
+                print(f"   rules: {st[:2]} | urls: {url[:2]}")
+                print(f"   outcomePrices sample: {[m.get('outcomePrices') for m in ev['markets'][:2]]}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
