@@ -505,6 +505,23 @@ if "cities" in probes:
                 print(f"   rules: {st[:2]} | urls: {url[:2]}")
                 print(f"   outcomePrices sample: {[m.get('outcomePrices') for m in ev['markets'][:2]]}")
 
+if "metar-timing" in probes:
+    # When does each EDDM report become available, and where? (latency test)
+    section("METAR timing: AWC receipt time, NOAA tgftp file, IEM")
+    r = requests.get("https://aviationweather.gov/api/data/metar", params={"ids": "EDDM", "format": "json", "hours": 3},
+                     headers=H, timeout=30)
+    j = r.json()
+    print(f"AWC -> {r.status_code}, {len(j)} reports; keys: {list(j[0].keys()) if j else None}")
+    for x in j[:6]:
+        print(f"   type {x.get('metarType')} obsTime {x.get('obsTime')} reportTime {x.get('reportTime')} "
+              f"receiptTime {x.get('receiptTime')} temp {x.get('temp')} raw {str(x.get('rawOb'))[:60]}")
+    r = requests.get("https://tgftp.nws.noaa.gov/data/observations/metar/stations/EDDM.TXT", headers=H, timeout=30)
+    print(f"\nNOAA tgftp EDDM.TXT -> {r.status_code}, Last-Modified {r.headers.get('Last-Modified')}\n   {r.text.strip()[:160]}")
+    r = requests.get("https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
+                     params={"station": "EDDM", "data": "metar", "hours": 2, "tz": "UTC", "format": "onlycomma",
+                             "report_type": "3,4"}, headers=H, timeout=30)
+    print(f"\nIEM -> {r.status_code}\n   {r.text.strip()[:300]}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
