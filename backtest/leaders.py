@@ -22,6 +22,7 @@ Run:  python3 -m backtest.leaders
 """
 import json
 import os
+import sys
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +30,11 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import requests
 
-DATA = os.path.join("backtest_data", "leaders")
+# "python3 -m backtest.leaders alltime" -> all-time top N_ALLTIME, full history, separate folder
+ALLTIME = len(sys.argv) > 1 and sys.argv[1] == "alltime"
+DATA = os.path.join("backtest_data", "leaders_alltime" if ALLTIME else "leaders")
+N_ALLTIME = 30
+MAX_MINUTES = 330
 H = {"User-Agent": "munich-weather-bot backtest (research)"}
 DAYS = 30
 N_MONTH, N_ALL = 20, 10
@@ -61,7 +66,7 @@ def key(r):
 
 def wallet_fills(wallet, cutoff, taker_only):
     rows, cursor = [], None
-    for _ in range(400):
+    for _ in range(4000):
         params = {"user": wallet, "limit": 500, "taker_only": "true" if taker_only else "false"}
         if cursor:
             params["cursor"] = cursor
@@ -114,11 +119,11 @@ def one_event(slug):
 
 def main():
     os.makedirs(DATA, exist_ok=True)
-    b = board("month", N_MONTH) + board("all", N_ALL)
+    b = board("all", N_ALLTIME) if ALLTIME else board("month", N_MONTH) + board("all", N_ALL)
     bd = pd.DataFrame(b).drop_duplicates("user_id")
     bd.to_csv(os.path.join(DATA, "board.csv"), index=False)
     print(f"{len(bd)} wallets")
-    cutoff = int(time.time()) - DAYS * 86400
+    cutoff = 0 if ALLTIME else int(time.time()) - DAYS * 86400
     with ThreadPoolExecutor(4) as ex:
         res = list(ex.map(one_wallet, [(w, n, cutoff) for w, n in zip(bd.user_id, bd.user_name)]))
     fills = pd.DataFrame([r for x in res for r in x], columns=["wallet", "name", "role", "side", "token_id", "condition_id",
