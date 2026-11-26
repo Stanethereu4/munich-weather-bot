@@ -124,11 +124,19 @@ def main():
     bd.to_csv(os.path.join(DATA, "board.csv"), index=False)
     print(f"{len(bd)} wallets")
     cutoff = 0 if ALLTIME else int(time.time()) - DAYS * 86400
+    # one file per wallet: GitHub refuses files over 100 MB, and a re-run skips wallets already saved
+    fdir = os.path.join(DATA, "fills")
+    os.makedirs(fdir, exist_ok=True)
+    cols = ["wallet", "name", "role", "side", "token_id", "condition_id", "event_slug", "outcome", "size", "price", "timestamp"]
+    todo = [(w, n, cutoff) for w, n in zip(bd.user_id, bd.user_name)
+            if not os.path.exists(os.path.join(fdir, f"{w}.parquet"))]
     with ThreadPoolExecutor(4) as ex:
-        res = list(ex.map(one_wallet, [(w, n, cutoff) for w, n in zip(bd.user_id, bd.user_name)]))
-    fills = pd.DataFrame([r for x in res for r in x], columns=["wallet", "name", "role", "side", "token_id", "condition_id",
-                                                               "event_slug", "outcome", "size", "price", "timestamp"])
-    fills.to_parquet(os.path.join(DATA, "fills.parquet"), index=False)
+        for args, res in zip(todo, ex.map(one_wallet, todo)):
+            df = pd.DataFrame(res, columns=cols).drop(columns=["condition_id"])
+            for c in ("name", "role", "side", "event_slug", "outcome"):
+                df[c] = df[c].astype("category")              # smaller files
+            df.to_parquet(os.path.join(fdir, f"{args[0]}.parquet"), index=False)
+    fills = pd.concat([pd.read_parquet(os.path.join(fdir, x), columns=["event_slug"]) for x in os.listdir(fdir)])
     slugs = sorted(fills.event_slug.dropna().unique())
     print(f"{len(fills)} fills in {len(slugs)} events; fetching outcomes")
     with ThreadPoolExecutor(8) as ex:

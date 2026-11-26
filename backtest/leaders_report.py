@@ -54,7 +54,11 @@ def parse(slug):
 
 
 def load():
-    f = pd.read_parquet(os.path.join(DATA, "fills.parquet"))
+    fdir = os.path.join(DATA, "fills")
+    f = pd.concat([pd.read_parquet(os.path.join(fdir, x)) for x in sorted(os.listdir(fdir))]) if os.path.isdir(fdir) \
+        else pd.read_parquet(os.path.join(DATA, "fills.parquet"))
+    for c in ("name", "role", "side", "event_slug", "outcome"):
+        f[c] = f[c].astype(str)
     pay = pd.read_csv(os.path.join(DATA, "payout.csv"), dtype={"token_id": str}).drop_duplicates("token_id")
     f = f.merge(pay, on="token_id", how="left")
     meta = {s: parse(s) for s in f.event_slug.dropna().unique()}
