@@ -54,7 +54,7 @@ ENS_MODELS = ["ecmwf_ifs025_ensemble_mean", "dwd_icon_eps_ensemble_mean_seamless
 def get_json(url, params, tries=5):
     for k in range(tries):
         try:
-            r = requests.get(url, params=params, headers=H, timeout=(10, 90))
+            r = requests.get(url, params=params, headers=H, timeout=(10, 180))
             if r.status_code == 429:
                 time.sleep(5 * (k + 1)); continue
             r.raise_for_status()
@@ -133,13 +133,16 @@ def prices():
 
 
 def ensemble():
-    end = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).date()
+    end = today.isoformat()
+    # the archive is a rolling window of ~94 days, so start 92 days back (not a fixed date)
+    start = max(FIRST_DAY, today - timedelta(days=92)).isoformat()
     hourly = ",".join(f"temperature_2m_previous_day{n},temperature_2m_spread_previous_day{n}" for n in (1, 2, 3))
     for city, (_, _, lat, lon) in CITIES.items():
         parts = []
         for m in ENS_MODELS:
             j = get_json(ENS, {"latitude": lat, "longitude": lon, "models": m, "hourly": hourly,
-                               "start_date": FIRST_DAY.isoformat(), "end_date": end, "timezone": "UTC"})
+                               "start_date": start, "end_date": end, "timezone": "UTC"})
             if not j:
                 print(f"{city} {m}: FAILED"); continue
             time.sleep(2)
