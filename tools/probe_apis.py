@@ -563,6 +563,31 @@ if "rules-us" in probes:
         print(f"\n{c}: labels {[m.get('groupItemTitle') for m in ev['markets']][:4]}...")
         print("   " + (ev.get("description") or "").replace("\n", " ")[:1500])
 
+if "leaders" in probes:
+    # Is there a weather leaderboard, and what per-wallet history can we get?
+    section("Leaderboards and per-wallet endpoints")
+    W = "0xb9012e0d9b60d3920286309328b935cdfa609fc4"      # Weatherstappen (seen in Munich fills)
+    tries = [
+        ("https://data-api.polymarket.com/v1/leaderboard", {"category": "WEATHER", "timePeriod": "MONTH", "orderBy": "PNL", "limit": 3}),
+        ("https://data-api.polymarket.com/v1/leaderboard", {"category": "weather", "limit": 3}),
+        ("https://data-api.polymarket.com/v2/leaderboard", {"category": "weather", "limit": 3}),
+        ("https://lb-api.polymarket.com/profit", {"window": "1m", "limit": 3, "tag": "weather"}),
+        ("https://data-api.polymarket.com/v2/positions", {"user": W, "limit": 2}),
+        ("https://data-api.polymarket.com/v2/closed-positions", {"user": W, "limit": 2}),
+        ("https://data-api.polymarket.com/closed-positions", {"user": W, "limit": 2}),
+        ("https://data-api.polymarket.com/v2/activity", {"user": W, "limit": 2}),
+        ("https://data-api.polymarket.com/activity", {"user": W, "limit": 2}),
+        ("https://data-api.polymarket.com/v2/trades", {"user": W, "limit": 2}),
+        ("https://data-api.polymarket.com/v2/trades", {"user": W, "limit": 2, "taker_only": "false"}),
+        ("https://data-api.polymarket.com/value", {"user": W}),
+    ]
+    for url, params in tries:
+        try:
+            r = requests.get(url, params=params, headers=H, timeout=30)
+            print(f"\n{url} {params} -> {r.status_code}\n   {r.text[:700]}")
+        except Exception as e:
+            print(f"\n{url} -> {type(e).__name__}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
