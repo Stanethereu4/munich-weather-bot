@@ -588,6 +588,24 @@ if "leaders" in probes:
         except Exception as e:
             print(f"\n{url} -> {type(e).__name__}")
 
+if "leaders2" in probes:
+    # Which leaderboard parameters change the answer?
+    section("v2 leaderboard parameters")
+    base = "https://data-api.polymarket.com/v2/leaderboard"
+    def top(params):
+        r = requests.get(base, params={"category": "weather", "limit": 5, **params}, headers=H, timeout=30)
+        if r.status_code != 200:
+            return f"{r.status_code} {r.text[:160]}"
+        return [(x["user_name"][:14], round(x["pnl"]), round(x["volume"])) for x in r.json()["data"]]
+    print("default:", top({}))
+    for k in ("time_period", "timePeriod", "period", "window", "interval"):
+        for v in ("all", "ALL", "month", "MONTH", "1m", "week", "day"):
+            print(f"{k}={v}:", top({k: v}))
+    for k in ("order_by", "orderBy", "sort", "sort_by"):
+        for v in ("volume", "VOLUME", "vol"):
+            print(f"{k}={v}:", top({k: v}))
+    print("category=all:", top({"category": "all"}))
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
