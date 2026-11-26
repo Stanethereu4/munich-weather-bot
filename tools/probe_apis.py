@@ -522,6 +522,35 @@ if "metar-timing" in probes:
                              "report_type": "3,4"}, headers=H, timeout=30)
     print(f"\nIEM -> {r.status_code}\n   {r.text.strip()[:300]}")
 
+if "rewards" in probes:
+    # Do weather markets pay maker rewards / rebates? Fields per market + CLOB rewards endpoints.
+    section("Maker rewards / rebates on weather markets")
+    import datetime as _dt
+    d = _dt.datetime.now(_dt.timezone.utc).date()
+    for slug in (f"highest-temperature-in-munich-on-{d.strftime('%B').lower()}-{d.day}-{d.year}",
+                 f"lowest-temperature-in-munich-on-{d.strftime('%B').lower()}-{d.day}-{d.year}",
+                 f"highest-temperature-in-seoul-on-{d.strftime('%B').lower()}-{d.day}-{d.year}"):
+        ev = requests.get(f"{GAMMA}/events", params={"slug": slug}, headers=H, timeout=30).json()
+        if not ev:
+            print(slug, "not found"); continue
+        ev = ev[0]
+        evk = {k: v for k, v in ev.items() if any(w in k.lower() for w in ("reward", "rebate", "fee", "incentive", "negrisk"))}
+        print(f"\n{slug}\n  event fields: {evk}")
+        m = ev["markets"][len(ev["markets"]) // 2]
+        mk = {k: v for k, v in m.items() if any(w in k.lower() for w in ("reward", "rebate", "fee", "incentive", "spread", "liquidity"))}
+        print(f"  market {m.get('groupItemTitle')}: {json.dumps(mk)[:900]}")
+        cond = m["conditionId"]
+        for url in (f"https://clob.polymarket.com/rewards/markets/{cond}", f"https://clob.polymarket.com/markets/{cond}"):
+            r = requests.get(url, headers=H, timeout=30)
+            txt = r.text
+            keep = txt if "rewards" in url else json.dumps({k: v for k, v in (r.json() if r.status_code == 200 else {}).items()
+                                                           if any(w in k.lower() for w in ("reward", "fee", "rebate", "maker", "taker"))})
+            print(f"  {url.split('.com')[1][:40]} -> {r.status_code}: {keep[:700]}")
+    for url in ("https://clob.polymarket.com/rewards/markets/current?limit=5",
+                "https://clob.polymarket.com/sampling-markets?limit=1"):
+        r = requests.get(url, headers=H, timeout=30)
+        print(f"\n{url} -> {r.status_code}: {r.text[:500]}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
