@@ -16,13 +16,15 @@ Run:  python3 -m backtest.leaders_report
 """
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 
-DATA = os.path.join("backtest_data", "leaders")
+# "python3 -m backtest.leaders_report alltime" -> the all-time top 30, full history
+DATA = os.path.join("backtest_data", "leaders_alltime" if len(sys.argv) > 1 and sys.argv[1] == "alltime" else "leaders")
 FEE_START = int(datetime(2026, 11, 20, tzinfo=timezone.utc).timestamp())
 TZ = {
     "seoul": "Asia/Seoul", "busan": "Asia/Seoul", "hong-kong": "Asia/Hong_Kong", "tokyo": "Asia/Tokyo",
@@ -123,6 +125,17 @@ def main():
     c = p[["name", "pnl_2d", "pnl_dbefore", "pnl_onday", "pnl_after", "pnl_maker", "pnl_taker"]].round(0)
     print("\n3) WHERE THE PROFIT COMES FROM ($)")
     print(c.to_string(index=False))
+    r = f[f.payout.notna()].copy()
+    r["month"] = pd.to_datetime(r.timestamp, unit="s").dt.strftime("%Y-%m")
+    m = r.pivot_table(index="name", columns="month", values="pnl", aggfunc="sum").fillna(0)
+    m = m.loc[m.sum(axis=1).sort_values(ascending=False).index]
+    m.index = [str(i)[:16] for i in m.index]
+    print("\n4) PROFIT BY MONTH ($ thousands, resolved fills, by trade date)")
+    print((m / 1000).map(lambda x: "." if abs(x) < 0.05 else f"{x:.1f}").to_string())   # in $ thousands
+    v = r.pivot_table(index="name", columns="month", values="usd", aggfunc="sum").fillna(0)
+    ret = (100 * r.groupby(["month"]).pnl.sum() / r.groupby("month").usd.sum()).round(1)
+    print("\nall these wallets together, return per $100 traded by month:")
+    print(ret.to_string())
     print("\nleaderboard figures for reference (their own PnL definition):")
     print(board[["user_name", "period", "pnl", "volume"]].round(0).to_string(index=False))
 
