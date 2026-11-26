@@ -447,6 +447,32 @@ if "trades-shape" in probes:
             r = requests.get(url, params=params, headers=H, timeout=60)
             print(f"\n{url} (one wallet) -> {r.status_code}\n  ", r.text[:600])
 
+if "trades-shape2" in probes:
+    section("Trades v2: full keys, taker_only switch, per-wallet endpoints")
+    cond = "0x054fa1234215343aae10e41fa312ef0d2d54676be0c4e98d2f0d874b40ff7c65"
+    r = requests.get("https://data-api.polymarket.com/trades", params={"market": cond}, headers=H, timeout=60)
+    print("v1 410 body:", r.text[:600])
+    def page(params):
+        r = requests.get("https://data-api.polymarket.com/v2/trades", params={"condition": cond, "limit": 500, **params},
+                         headers=H, timeout=60)
+        j = r.json() if r.status_code == 200 else {}
+        return r.status_code, j.get("data") or [], j.get("pagination"), r.text[:200]
+    st, rows, pg, _ = page({})
+    print("default:", st, len(rows), "pagination:", pg)
+    if rows:
+        print("keys:", list(rows[0].keys()))
+        print("non-profile fields:", {k: v for k, v in rows[0].items() if k not in ("bio", "icon", "profile_image", "profile_image_optimized", "title")})
+    for extra in ({"taker_only": "false"}, {"takerOnly": "false"}, {"taker_only": "true"}, {"side": "maker"}):
+        st, rows2, pg2, txt = page(extra)
+        print(extra, "->", st, len(rows2), pg2 if st == 200 else txt)
+    w = rows[0]["proxy_wallet"] if rows else None
+    for base in ("https://data-api.polymarket.com/v2", "https://data-api.polymarket.com"):
+        for ep, params in (("trades", {"user": w, "limit": 3}), ("positions", {"user": w, "limit": 2}),
+                           ("closed-positions", {"user": w, "limit": 2}), ("activity", {"user": w, "limit": 2}),
+                           ("leaderboard", {"limit": 2}), ("holders", {"market": cond, "limit": 2})):
+            r = requests.get(f"{base}/{ep}", params=params, headers=H, timeout=60)
+            print(f"\n{base}/{ep} -> {r.status_code}: {r.text[:450]}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
