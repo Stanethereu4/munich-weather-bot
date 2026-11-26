@@ -34,6 +34,7 @@ on:
           - probe            # print real API response structures (tools/probe_apis.py)
           - dry-run          # full pipeline on a throwaway SQLite DB (production DB untouched)
           - backtest         # run one backtest script (backtest_args), save backtest_data/ as an artifact
+          - arb-scan         # read-only scan of logged order books for riskless combinations (tools/arb_scan.py)
       backtest_args:
         description: "For task=backtest: module + args, e.g. 'markets' or 'prices'"
         type: string
@@ -131,7 +132,7 @@ jobs:
       github.event.schedule == '17 3 * * 1' ||
       (github.event_name == 'workflow_dispatch' &&
        (inputs.task == 'calibrate' || inputs.task == 'check-station' || inputs.task == 'probe' ||
-        inputs.task == 'dry-run'))
+        inputs.task == 'dry-run' || inputs.task == 'arb-scan'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -156,6 +157,11 @@ jobs:
           python3 munich_bot.py
           python3 station_obs.py
           python3 tools/dry_run_report.py
+      - name: Scan logged order books for free-money combinations (SELECT only)
+        if: inputs.task == 'arb-scan'
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 tools/arb_scan.py
       - name: Measure lead-time calibration
         if: github.event_name == 'schedule' || inputs.task == 'calibrate'
         env:
