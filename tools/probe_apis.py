@@ -551,6 +551,18 @@ if "rewards" in probes:
         r = requests.get(url, headers=H, timeout=30)
         print(f"\n{url} -> {r.status_code}: {r.text[:500]}")
 
+if "rules-us" in probes:
+    # Full resolution rules for the °F cities (which source, whole degrees or tenths?)
+    section("Resolution rules, US / F cities")
+    for c in ("chicago", "seattle", "denver", "toronto"):
+        ev = requests.get(f"{GAMMA}/events", params={"slug": f"highest-temperature-in-{c}-on-november-20-2026"},
+                          headers=H, timeout=30).json()
+        if not ev:
+            print(c, "not found"); continue
+        ev = ev[0]
+        print(f"\n{c}: labels {[m.get('groupItemTitle') for m in ev['markets']][:4]}...")
+        print("   " + (ev.get("description") or "").replace("\n", " ")[:1500])
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
