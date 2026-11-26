@@ -105,7 +105,10 @@ def main():
             n = len(g)
             sig.append(("no-all", sid, ts, kind, slug, (n - 1) - sum((1 - x) + fee(1 - x) for x in b)))
     # check 3
-    for (sid, d), g in ps.groupby(["snapshot_id", "date"]):
+    # each event has its own snapshot_id; one 15-min logging pass = same 10-minute bucket
+    ps["pass"] = pd.to_datetime(ps["ts_utc"], utc=True, format="ISO8601").dt.floor("10min").astype(str)
+    for (sid, d), g in ps.groupby(["pass", "date"]):
+        g = g[g.snapshot_id.isin(g.groupby("event_slug")["snapshot_id"].first())]   # one snapshot per event
         hi, lo = g[g.market_kind == "high"], g[g.market_kind == "low"]
         if hi.empty or lo.empty or hi.bracket_label.nunique() < n_br[hi.event_slug.iloc[0]] \
                 or lo.bracket_label.nunique() < n_br[lo.event_slug.iloc[0]]:
