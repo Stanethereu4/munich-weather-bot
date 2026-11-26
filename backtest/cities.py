@@ -59,7 +59,9 @@ def get_json(url, params, tries=5):
                 time.sleep(5 * (k + 1)); continue
             r.raise_for_status()
             return r.json()
-        except requests.RequestException:
+        except requests.RequestException as e:
+            body = getattr(getattr(e, "response", None), "text", "") or ""
+            print(f"    {url.split('/')[2]} attempt {k + 1}: {type(e).__name__} {body[:160]}")
             time.sleep(3 * (k + 1))
     return None
 
@@ -140,6 +142,7 @@ def ensemble():
                                "start_date": FIRST_DAY.isoformat(), "end_date": end, "timezone": "UTC"})
             if not j:
                 print(f"{city} {m}: FAILED"); continue
+            time.sleep(2)
             h = j["hourly"]
             t = to_unix_seconds(pd.Series(h["time"])).to_numpy()
             for n in (1, 2, 3):
