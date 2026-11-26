@@ -402,6 +402,51 @@ if "ens-prev" in probes:
             nn = [i for i, x in enumerate(v) if x is not None]
             print(f"   {k}: non-null {len(nn)}/{len(v)} first {t[nn[0]] if nn else None} sample@2026-10-15T12={v[t.index('2026-10-15T12:00')]}")
 
+if "trades-shape" in probes:
+    # Who trades Munich markets, and can we see maker vs taker per fill?
+    section("Trades data: wallets and maker/taker")
+    slug = "highest-temperature-in-munich-on-november-23-2026"
+    ev = requests.get(f"{GAMMA}/events", params={"slug": slug}, headers=H, timeout=20).json()[0]
+    m = max(ev["markets"], key=lambda m: float(m.get("volumeNum") or 0))
+    cond, tok = m["conditionId"], json.loads(m["clobTokenIds"])[0]
+    print(f"{slug} bracket {m.get('groupItemTitle')} volume {m.get('volumeNum')} cond {cond[:14]}.. token {tok[:14]}..")
+    for url, params in (("https://data-api.polymarket.com/trades", {"market": cond, "limit": 3}),
+                        ("https://data-api.polymarket.com/v2/trades", {"condition": cond, "limit": 3})):
+        r = requests.get(url, params=params, headers=H, timeout=60)
+        print(f"\n{url} -> {r.status_code}")
+        try:
+            j = r.json()
+        except Exception:
+            print(r.text[:200]); continue
+        rows = j if isinstance(j, list) else (j.get("data") or [])
+        if isinstance(j, dict):
+            print("  top-level keys:", list(j.keys()))
+        for row in rows[:2]:
+            print("  ", json.dumps(row)[:700])
+    gq = ("https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0bfh/"
+          "subgraphs/orderbook-subgraph/0.0.1/gn")
+    q = {"query": '{ orderFilledEvents(first: 3, orderBy: timestamp, orderDirection: desc, '
+                  'where: {makerAssetId: "%s"}) { id timestamp maker taker makerAssetId takerAssetId '
+                  'makerAmountFilled takerAmountFilled fee } }' % tok}
+    try:
+        r = requests.post(gq, json=q, headers=H, timeout=60)
+        print(f"\ngoldsky orderbook subgraph -> {r.status_code}\n  ", r.text[:900])
+    except requests.RequestException as e:
+        print("goldsky:", type(e).__name__)
+    w = None
+    try:
+        rows = requests.get("https://data-api.polymarket.com/trades", params={"market": cond, "limit": 1},
+                            headers=H, timeout=60).json()
+        w = rows[0].get("proxyWallet") if rows else None
+    except Exception:
+        pass
+    if w:
+        for url, params in (("https://data-api.polymarket.com/positions", {"user": w, "limit": 2}),
+                            ("https://data-api.polymarket.com/closed-positions", {"user": w, "limit": 2}),
+                            ("https://data-api.polymarket.com/activity", {"user": w, "limit": 2})):
+            r = requests.get(url, params=params, headers=H, timeout=60)
+            print(f"\n{url} (one wallet) -> {r.status_code}\n  ", r.text[:600])
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
