@@ -651,6 +651,45 @@ if "kalshi" in probes:
     if ms:
         print(f"\n   settled KXHIGHNY markets in one page: {len(ms)}, close times {min(m['close_time'] for m in ms)} .. {max(m['close_time'] for m in ms)}, cursor {bool(j.get('cursor'))}")
 
+if "kalshi-map" in probes:
+    # Which station does each Kalshi daily temperature series settle on, and which does Polymarket use per city?
+    import re as _re
+    section("Station mapping Kalshi vs Polymarket")
+    K = "https://api.elections.kalshi.com/trade-api/v2"
+    ser = requests.get(K + "/series", params={"category": "Climate and Weather"}, headers=H, timeout=30).json()["series"]
+    daily = [x for x in ser if x.get("frequency") == "daily" and _re.search(r"(high|low|max|min)", (x.get("title") or "").lower())
+             and "hourly" not in (x.get("title") or "").lower()]
+    print(f"Kalshi daily high/low series: {len(daily)}")
+    for x in sorted(daily, key=lambda x: x["ticker"]):
+        ms = requests.get(K + "/markets", params={"series_ticker": x["ticker"], "status": "settled", "limit": 3},
+                          headers=H, timeout=30).json().get("markets", [])
+        if not ms:
+            continue
+        m = ms[0]
+        rp = (m.get("rules_primary") or "")
+        stn = _re.search(r"recorded (?:at|in) (.+?) for ", rp)
+        n = requests.get(K + "/markets", params={"series_ticker": x["ticker"], "status": "settled", "limit": 1000},
+                         headers=H, timeout=30).json().get("markets", [])
+        last = max((y["close_time"] for y in n), default=None)
+        print(f"  K {x['ticker']:15} {x['title'][:38]:38} | {stn.group(1) if stn else rp[:90]} | {m.get('yes_sub_title')} | "
+              f"{len(n)} settled, last close {last}")
+    print("\nPolymarket resolution station per city (highest-temperature event of 25 Nov):")
+    import datetime as _dt
+    for c in ["nyc", "chicago", "miami", "austin", "dallas", "houston", "atlanta", "denver", "los-angeles",
+              "san-francisco", "seattle", "toronto", "paris", "london", "tokyo", "seoul", "istanbul", "mexico-city",
+              "madrid", "amsterdam", "milan", "munich", "helsinki", "warsaw", "moscow", "tel-aviv", "ankara",
+              "hong-kong", "singapore", "shanghai", "beijing", "busan", "taipei", "sao-paulo", "buenos-aires",
+              "wellington", "cape-town", "jeddah", "karachi", "lucknow", "manila", "kuala-lumpur", "panama-city"]:
+        for kind in ("highest", "lowest"):
+            ev = requests.get(f"{GAMMA}/events", params={"slug": f"{kind}-temperature-in-{c}-on-november-25-2026"},
+                              headers=H, timeout=30).json()
+            if not ev:
+                continue
+            d = ev[0].get("description") or ""
+            stn = _re.search(r"recorded (?:at|by) (?:the )?(.+?)(?: in degrees| Station| station|,|\.)", d)
+            unit = "F" if "°F" in json.dumps([m.get("groupItemTitle") for m in ev[0]["markets"]]) else "C"
+            print(f"  P {c:14} {kind:8} {unit} | {stn.group(1)[:70] if stn else d[:120]}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
