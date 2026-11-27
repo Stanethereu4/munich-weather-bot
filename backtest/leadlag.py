@@ -78,6 +78,15 @@ def series(km, pm):
             df["city"], df["date"], df["X"] = city, date, X
             df["same_airport"] = bool(kb.same_airport.iloc[0])
             df["n_up"], df["n_dn"], df["won_up"], df["won_dn"] = n_up, n_dn, won_up, won_dn
+            # single brackets next to the threshold (Polymarket brackets are 2°F wide, offset by 1°F)
+            p_hi_arr = pb.set_index("yes_token").hi.reindex(P.columns).to_numpy()
+            for name, mask in (("nb_up", p_lo == X + 1), ("nb_dn", p_hi_arr == X - 2), ("strad", p_lo == X - 1)):
+                if mask.sum() == 1:
+                    df[f"{name}_p"] = P.loc[:, mask].iloc[:, 0].to_numpy()
+                    df[f"{name}_won"] = int(p_won[mask][0])
+                else:
+                    df[f"{name}_p"] = np.nan
+                    df[f"{name}_won"] = np.nan
             out.append(df)
     return pd.concat(out)
 
@@ -92,6 +101,8 @@ def features(s):
         s[f"fK{h}"] = g.k.shift(-h) - s.k
         s[f"fUp{h}"] = g.p_up.shift(-h) - s.p_up        # change in the price of the set actually bought
         s[f"fLo{h}"] = g.p_lo.shift(-h) - s.p_lo
+    for name in ("nb_up", "nb_dn", "strad"):
+        s[f"f_{name}30"] = g[f"{name}_p"].shift(-30) - s[f"{name}_p"]
     s["okall"] = s.ok & g.ok.shift(LOOK).fillna(False).astype(bool) & g.ok.shift(-30).fillna(False).astype(bool)
     s = s[s.okall & s.k.between(.05, .95) & s.p.between(.05, .95)].dropna(subset=["dK", "dP", "fP30", "fK30"])
     return s
@@ -146,6 +157,39 @@ def trades(s):
     print(pd.DataFrame(res).round(2).to_string(index=False))
 
 
+def single(s):
+    print("\n3) SINGLE BRACKET next to the threshold (one spread instead of ~5)")
+    res = []
+    for thr in (0.05, 0.10):
+        sig = s[(s.dK.abs() >= thr) & (s.dP.abs() < thr / 2)].sort_values("t")
+        keep, last = [], {}
+        for r in sig.itertuples():
+            k = (r.city, r.date, r.X)
+            if k in last and r.t - last[k] < 1800:
+                continue
+            last[k] = r.t; keep.append(r.Index)
+        sig = sig.loc[keep]
+        up = (sig.dK > 0).to_numpy()
+        variants = {
+            # (price of what we buy, its outcome 1/0, its 30-min price change)
+            "neighbour": (np.where(up, sig.nb_up_p, sig.nb_dn_p), np.where(up, sig.nb_up_won, sig.nb_dn_won),
+                          np.where(up, sig.f_nb_up30, sig.f_nb_dn30)),
+            "straddle": (np.where(up, 1 - sig.strad_p, sig.strad_p), np.where(up, 1 - sig.strad_won, sig.strad_won),
+                         np.where(up, -sig.f_strad30, sig.f_strad30)),
+        }
+        for name, (price, won, move) in variants.items():
+            ok = ~np.isnan(price) & ~np.isnan(won) & (price > 0.02) & (price < 0.98)
+            price, won, move = price[ok], won[ok], move[ok]
+            fee = FEE * price * (1 - price)
+            hold = won - price - HALF_SPREAD - fee
+            flip = move - 2 * HALF_SPREAD - 2 * fee
+            t = lambda x: x.mean() / (x.std(ddof=1) / np.sqrt(len(x)))
+            res.append(dict(kalshi_move=f">= {thr*100:.0f}c", bet=name, trades=int(ok.sum()), avg_price_c=100 * price.mean(),
+                            gross_hold_c=100 * (won - price).mean(), profit_hold_c=100 * hold.mean(), t_hold=t(hold),
+                            move_30min_c=100 * np.nanmean(move), profit_30min_c=100 * np.nanmean(flip)))
+    print(pd.DataFrame(res).round(2).to_string(index=False))
+
+
 def main():
     km, pm = load()
     s = features(series(km, pm))
@@ -153,6 +197,7 @@ def main():
           f"{s.groupby(['city', 'date', 'X']).ngroups} thresholds\n")
     regressions(s)
     trades(s)
+    single(s)
 
 
 if __name__ == "__main__":
