@@ -201,6 +201,8 @@ jobs:
           mkdir -p /tmp/bd/backtest_data
           ln -s /tmp/bd/backtest_data backtest_data
       - name: Run backtest step
+        env:
+          TELONEX_API_KEY: ${{ secrets.TELONEX_API_KEY }}     # only used by backtest/telonex_books.py
         run: python3 -m backtest.${{ inputs.backtest_args }}
       - name: Save to the backtest-data branch
         if: always()
