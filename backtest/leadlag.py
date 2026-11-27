@@ -84,9 +84,14 @@ def series(km, pm):
                 if mask.sum() == 1:
                     df[f"{name}_p"] = P.loc[:, mask].iloc[:, 0].to_numpy()
                     df[f"{name}_won"] = int(p_won[mask][0])
+                    tok = P.columns[mask][0]
+                    df[f"{name}_tok"] = tok
+                    df[f"{name}_notok"] = pb.set_index("yes_token").no_token.get(tok)
                 else:
                     df[f"{name}_p"] = np.nan
                     df[f"{name}_won"] = np.nan
+                    df[f"{name}_tok"] = None
+                    df[f"{name}_notok"] = None
             out.append(df)
     return pd.concat(out)
 
