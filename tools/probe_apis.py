@@ -691,25 +691,37 @@ if "kalshi-map" in probes:
             print(f"  P {c:14} {kind:8} {unit} | {stn.group(1)[:70] if stn else d[:120]}")
 
 if "telonex" in probes:
-    # Free Telonex markets dataset (no account): does it cover the weather markets, and which channels/dates?
-    import io
+    # Free Telonex markets dataset (no account, ~4 GB): does it cover the weather markets, and which channels/dates?
+    import subprocess, sys as _sys
+    subprocess.run([_sys.executable, "-m", "pip", "install", "-q", "pyarrow"], check=True)
+    import pyarrow.parquet as pq
     import pandas as pd
     section("Telonex coverage of weather markets")
-    r = requests.get("https://api.telonex.io/v1/datasets/polymarket/markets", headers=H, timeout=120, allow_redirects=True)
-    print("status", r.status_code, "bytes", len(r.content))
-    df = pd.read_parquet(io.BytesIO(r.content))
-    print("columns:", list(df.columns))
-    print("rows:", len(df))
-    w = df[df["slug"].astype(str).str.contains("temperature-in-", na=False)]
+    with requests.get("https://api.telonex.io/v1/datasets/polymarket/markets", headers=H, timeout=600, stream=True) as r:
+        r.raise_for_status()
+        with open("/tmp/tlx_markets.parquet", "wb") as fh:
+            for chunk in r.iter_content(1 << 22):
+                fh.write(chunk)
+    pf = pq.ParquetFile("/tmp/tlx_markets.parquet")
+    cols = pf.schema_arrow.names
+    print("columns:", cols, "| rows:", pf.metadata.num_rows)
+    keep = []
+    for batch in pf.iter_batches(batch_size=200_000):
+        d = batch.to_pandas()
+        m = d["slug"].astype(str).str.contains("temperature-in-", na=False) if "slug" in d else None
+        if m is not None and m.any():
+            keep.append(d[m])
+    w = pd.concat(keep) if keep else pd.DataFrame(columns=cols)
     print("daily-temperature markets in their list:", len(w))
-    avail = [c for c in df.columns if any(k in c.lower() for k in ("avail", "from", "to_", "start", "end", "first", "last"))]
+    avail = [c for c in cols if any(k in c.lower() for k in ("avail", "from", "_to", "start", "end", "first", "last", "channel"))]
     print("availability-like columns:", avail)
-    d = w[w["slug"].astype(str).str.contains("denver-on-november-1[34]-2026", na=False)]
-    with pd.option_context("display.width", 250, "display.max_columns", 40, "display.max_colwidth", 60):
-        print(d.head(4).T.to_string()[:4000])
     for c in avail:
-        nn = w[c].notna() & (w[c].astype(str) != "")
-        print(f"   {c}: non-empty for {nn.mean():.0%} of weather markets; example {w.loc[nn, c].astype(str).head(2).tolist()}")
+        nn = w[c].notna() & (w[c].astype(str).isin(["", "None", "nan", "NaT"]) == False)
+        print(f"   {c}: non-empty for {nn.mean():.0%} of weather markets; e.g. {w.loc[nn, c].astype(str).head(3).tolist()}")
+    d = w[w["slug"].astype(str).str.contains("denver-on-november-1[34]-2026", na=False)]
+    print(f"\nDenver 13-14 Nov rows: {len(d)}")
+    with pd.option_context("display.width", 250, "display.max_columns", 60, "display.max_colwidth", 70):
+        print(d.head(2).T.to_string()[:5000])
 
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
