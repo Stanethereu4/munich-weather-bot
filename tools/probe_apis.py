@@ -753,6 +753,46 @@ if "awc-history" in probes:
             print(f"     type {x.get('metarType')} obsTime {x.get('obsTime')} reportTime {x.get('reportTime')} "
                   f"receiptTime {x.get('receiptTime')} temp {x.get('temp')} raw {str(x.get('rawOb'))[:75]}")
 
+if "live" in probes:
+    # Live endpoints for the paper trader: Kalshi open markets (quotes), Kalshi recent trades,
+    # Polymarket batch order books, Polymarket recent trades by condition.
+    import time as _t
+    section("Live endpoints for paper trading")
+    K = "https://api.elections.kalshi.com/trade-api/v2"
+    j = requests.get(K + "/markets", params={"series_ticker": "KXHIGHDEN", "status": "open", "limit": 50}, headers=H, timeout=30).json()
+    ms = j.get("markets", [])
+    print(f"Kalshi open KXHIGHDEN markets: {len(ms)}; events {sorted(set(m['event_ticker'] for m in ms))}")
+    if ms:
+        m = ms[0]
+        print("  keys:", list(m.keys()))
+        print("  quote fields:", {k: m.get(k) for k in m if any(w in k for w in ("bid", "ask", "last", "volume", "strike", "status", "close"))})
+        r = requests.get(K + f"/markets/{m['ticker']}/orderbook", headers=H, timeout=30)
+        print(f"  /markets/<t>/orderbook -> {r.status_code}: {r.text[:500]}")
+        r = requests.get(K + "/markets/trades", params={"ticker": m["ticker"], "limit": 3, "min_ts": int(_t.time()) - 86400}, headers=H, timeout=30)
+        print(f"  /markets/trades?min_ts -> {r.status_code}: {r.text[:500]}")
+    d = _t.strftime("%B-%-d-%Y", _t.gmtime()).lower()
+    ev = requests.get(f"{GAMMA}/events", params={"slug": f"highest-temperature-in-denver-on-{d}"}, headers=H, timeout=30).json()
+    if ev:
+        toks = [json.loads(m["clobTokenIds"])[0] for m in ev[0]["markets"]][:3]
+        conds = [m["conditionId"] for m in ev[0]["markets"]][:1]
+        r = requests.post("https://clob.polymarket.com/books", json=[{"token_id": t} for t in toks], headers=H, timeout=30)
+        print(f"\nPolymarket POST /books ({len(toks)} tokens) -> {r.status_code}")
+        try:
+            b = r.json()
+            print("  type", type(b).__name__, "len", len(b))
+            x = b[0]
+            print("  keys:", list(x.keys()))
+            print("  bids[:2]", x.get("bids", [])[:2], "| asks[:2]", x.get("asks", [])[:2], "| asks[-2:]", x.get("asks", [])[-2:])
+            print("  timestamp", x.get("timestamp"), "tick", x.get("tick_size"))
+        except Exception as e:
+            print("  ", r.text[:400])
+        r = requests.get("https://data-api.polymarket.com/v2/trades", params={"condition": conds[0], "limit": 2}, headers=H, timeout=30)
+        print(f"\nPolymarket v2 trades -> {r.status_code}: {r.text[:300]}")
+    else:
+        print("no Polymarket Denver event for", d)
+    r = requests.get("https://aviationweather.gov/api/data/metar", params={"ids": "KDEN", "format": "json", "hours": 2}, headers=H, timeout=30)
+    print(f"\nAWC live -> {r.status_code}, {len(r.json())} reports, newest receiptTime {r.json()[0].get('receiptTime') if r.json() else None}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
