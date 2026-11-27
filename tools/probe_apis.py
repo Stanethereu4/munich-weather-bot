@@ -723,6 +723,16 @@ if "telonex" in probes:
     with pd.option_context("display.width", 250, "display.max_columns", 60, "display.max_colwidth", 70):
         print(d.head(2).T.to_string()[:5000])
 
+if "rules-full" in probes:
+    # Full resolution rules of a US daily-high market (which source, which reports, rounding)
+    section("Full resolution rules")
+    for slug in ("highest-temperature-in-denver-on-november-14-2026", "highest-temperature-in-houston-on-november-14-2026"):
+        ev = requests.get(f"{GAMMA}/events", params={"slug": slug}, headers=H, timeout=30).json()
+        if ev:
+            print(f"\n{slug}\n{ev[0].get('description')}\nresolutionSource: {ev[0].get('resolutionSource')}")
+            m = ev[0]["markets"][0]
+            print(f"market resolutionSource: {m.get('resolutionSource')}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
