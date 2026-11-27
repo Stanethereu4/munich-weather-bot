@@ -690,6 +690,27 @@ if "kalshi-map" in probes:
             unit = "F" if "°F" in json.dumps([m.get("groupItemTitle") for m in ev[0]["markets"]]) else "C"
             print(f"  P {c:14} {kind:8} {unit} | {stn.group(1)[:70] if stn else d[:120]}")
 
+if "telonex" in probes:
+    # Free Telonex markets dataset (no account): does it cover the weather markets, and which channels/dates?
+    import io
+    import pandas as pd
+    section("Telonex coverage of weather markets")
+    r = requests.get("https://api.telonex.io/v1/datasets/polymarket/markets", headers=H, timeout=120, allow_redirects=True)
+    print("status", r.status_code, "bytes", len(r.content))
+    df = pd.read_parquet(io.BytesIO(r.content))
+    print("columns:", list(df.columns))
+    print("rows:", len(df))
+    w = df[df["slug"].astype(str).str.contains("temperature-in-", na=False)]
+    print("daily-temperature markets in their list:", len(w))
+    avail = [c for c in df.columns if any(k in c.lower() for k in ("avail", "from", "to_", "start", "end", "first", "last"))]
+    print("availability-like columns:", avail)
+    d = w[w["slug"].astype(str).str.contains("denver-on-november-1[34]-2026", na=False)]
+    with pd.option_context("display.width", 250, "display.max_columns", 40, "display.max_colwidth", 60):
+        print(d.head(4).T.to_string()[:4000])
+    for c in avail:
+        nn = w[c].notna() & (w[c].astype(str) != "")
+        print(f"   {c}: non-empty for {nn.mean():.0%} of weather markets; example {w.loc[nn, c].astype(str).head(2).tolist()}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
