@@ -49,7 +49,14 @@ def parse(slug):
     m = SLUG.match(slug or "")
     if not m:
         return None, None, None
-    d = datetime.strptime(f"{m.group(3)} {m.group(4)} {m.group(5)}", "%B %d %Y").date()
+    txt = f"{m.group(3)} {m.group(4)} {m.group(5)}"
+    for fmt in ("%B %d %Y", "%b %d %Y"):            # older slugs use short months ("jan")
+        try:
+            d = datetime.strptime(txt, fmt).date(); break
+        except ValueError:
+            d = None
+    if d is None:
+        return None, None, None
     return ("high" if m.group(1) == "highest" else "low"), m.group(2), d
 
 
@@ -117,7 +124,7 @@ def main():
     a = p[["name", "pnl", "volume", "ret_per_100", "days", "win_days", "t_daily", "cities", "top_cities"]].copy()
     a[["pnl", "volume"]] = a[["pnl", "volume"]].round(0); a["ret_per_100"] = a.ret_per_100.round(1)
     a["win_days"] = pct("win_days"); a["t_daily"] = a.t_daily.round(1)
-    print("\n1) RESULTS, last 30 days, resolved markets (our calculation, held to resolution, no rebates)")
+    print(f"\n1) RESULTS, {'full history' if 'alltime' in DATA else 'last 30 days'}, resolved markets (our calculation, held to resolution, no rebates)")
     print(a.to_string(index=False))
     b = pd.DataFrame({"name": p.name})
     for c in ["maker", "lows", "buy_no", "buy_lt10c", "buy_10_50", "buy_50_90", "buy_gt90c", "sells",
