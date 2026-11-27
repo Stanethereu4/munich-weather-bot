@@ -736,18 +736,19 @@ if "rules-full" in probes:
 if "awc-history" in probes:
     # Can the resolution source itself (aviationweather.gov) give us 30 days back, with receipt times?
     section("aviationweather.gov history via date= (Polymarket's resolution source)")
-    for date in ("2026-11-15T10:00:00Z", "2026-11-01T10:00:00Z", "2026-10-28T10:00:00Z"):
+    for d_ in ("2026-11-15T10:00:00Z", "2026-11-01T10:00:00Z", "2026-10-28T10:00:00Z"):
+        date_q = d_
         r = requests.get("https://aviationweather.gov/api/data/metar",
-                         params={"ids": "KDEN", "format": "raw", "date": date, "hours": 30}, headers=H, timeout=30)
+                         params={"ids": "KDEN", "format": "raw", "date": date_q, "hours": 30}, headers=H, timeout=30)
         lines = [l for l in r.text.splitlines() if l.strip()]
-        print(f"raw  date={date}: {r.status_code}, {len(lines)} reports; first: {lines[0][:90] if lines else r.text[:120]}")
+        print(f"raw  date={date_q}: {r.status_code}, {len(lines)} reports; first: {lines[0][:90] if lines else r.text[:120]}")
         r = requests.get("https://aviationweather.gov/api/data/metar",
-                         params={"ids": "KDEN", "format": "json", "date": date, "hours": 30}, headers=H, timeout=30)
+                         params={"ids": "KDEN", "format": "json", "date": date_q, "hours": 30}, headers=H, timeout=30)
         try:
             j = r.json()
         except Exception:
-            print(f"json date={date}: {r.status_code} {r.text[:120]}"); continue
-        print(f"json date={date}: {r.status_code}, {len(j)} reports")
+            print(f"json date={date_q}: {r.status_code} {r.text[:120]}"); continue
+        print(f"json date={date_q}: {r.status_code}, {len(j)} reports")
         for x in j[:3]:
             print(f"     type {x.get('metarType')} obsTime {x.get('obsTime')} reportTime {x.get('reportTime')} "
                   f"receiptTime {x.get('receiptTime')} temp {x.get('temp')} raw {str(x.get('rawOb'))[:75]}")
