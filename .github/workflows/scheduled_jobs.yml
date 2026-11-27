@@ -35,6 +35,7 @@ on:
           - dry-run          # full pipeline on a throwaway SQLite DB (production DB untouched)
           - backtest         # run one backtest script (backtest_args), save backtest_data/ as an artifact
           - arb-scan         # read-only scan of logged order books for riskless combinations (tools/arb_scan.py)
+          - paper            # live PAPER trading loop, Kalshi -> Polymarket lead-lag (livepaper/), self-chaining
       backtest_args:
         description: "For task=backtest: module + args, e.g. 'markets' or 'prices'"
         type: string
@@ -104,6 +105,43 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run "${{ github.workflow }}" --repo "${{ github.repository }}" --ref "${{ github.ref_name }}" -f task=logging
+
+  paper:
+    # Live PAPER trading of the Kalshi -> Polymarket lead-lag strategy (no orders are ever placed).
+    # Loops for loop_minutes (default 340), checking both platforms every minute, then starts
+    # the next run itself (same trick as the logger). Publishes the dashboard to the `dashboard`
+    # branch every 10 minutes (GitHub Pages). To STOP: cancel the running "paper" run.
+    if: github.event_name == 'workflow_dispatch' && inputs.task == 'paper'
+    concurrency:
+      group: paper
+      cancel-in-progress: false
+    permissions:
+      contents: write    # push the dashboard branch
+      actions: write     # start the next paper run (self-chaining)
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Paper trading loop (every minute)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          minutes="${{ inputs.loop_minutes || '340' }}"
+          case "$minutes" in ''|*[!0-9]*) echo "loop_minutes must be a whole number"; exit 1;; esac
+          python3 -m livepaper.engine "$minutes"
+      - name: Start the next paper run (self-chaining)
+        if: (success() || failure()) && inputs.loop_minutes == '340'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run "${{ github.workflow }}" --repo "${{ github.repository }}" --ref "${{ github.ref_name }}" -f task=paper -f loop_minutes=340
 
   once:
     if: github.event_name == 'workflow_dispatch' && inputs.task == 'once'
