@@ -197,5 +197,44 @@ def main():
     print(f"Polymarket: {len(hist)} 1-minute prices")
 
 
+def pm_trades_event(slug):
+    """All TAKER fills of one Polymarket event (every bracket), same format as backtest/trades.py."""
+    j = get(f"{GAMMA}/events", {"slug": slug})
+    if not j:
+        return None
+    rows = []
+    for m in j[0].get("markets", []):
+        cursor = None
+        for _ in range(100):
+            p = {"condition": m["conditionId"], "limit": 500, "taker_only": "true"}
+            if cursor:
+                p["cursor"] = cursor
+            r = get("https://data-api.polymarket.com/v2/trades", p)
+            if r is None:
+                return None
+            for t in r.get("data") or []:
+                rows.append((slug, str(t["token_id"]), t["side"], float(t["size"]), float(t["price"]),
+                             int(t["timestamp"]), t["proxy_wallet"]))
+            pg = r.get("pagination") or {}
+            cursor = pg.get("next_cursor")
+            if not pg.get("has_more") or not cursor:
+                break
+    return rows
+
+
+def pm_trades():
+    """Taker fills for the same-airport cities (step 1 of the execution check)."""
+    pm = pd.read_csv(os.path.join(OUT, "pm_markets.csv"))
+    slugs = sorted(pm[pm.city.isin([c for c, (_, same) in PAIRS.items() if same])].event_slug.unique())
+    with ThreadPoolExecutor(6) as ex:
+        res = list(ex.map(pm_trades_event, slugs))
+    failed = sum(r is None for r in res)
+    rows = [x for r in res if r for x in r]
+    pd.DataFrame(rows, columns=["event_slug", "token_id", "side", "size", "price", "timestamp", "wallet"]).to_parquet(
+        os.path.join(OUT, "pm_trades.parquet"), index=False)
+    print(f"Polymarket taker fills: {len(rows)} in {len(slugs) - failed} events ({failed} failed)")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    pm_trades() if len(sys.argv) > 1 and sys.argv[1] == "pmtrades" else main()
