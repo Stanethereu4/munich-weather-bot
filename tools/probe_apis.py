@@ -606,6 +606,51 @@ if "leaders2" in probes:
             print(f"{k}={v}:", top({k: v}))
     print("category=all:", top({"category": "all"}))
 
+if "kalshi" in probes:
+    # Kalshi public API: daily temperature series, settlement rules, price history (read-only, no auth)
+    import time as _t
+    section("Kalshi weather markets")
+    K = "https://api.elections.kalshi.com/trade-api/v2"
+    def kget(path, params=None):
+        r = requests.get(K + path, params=params or {}, headers=H, timeout=30)
+        try:
+            return r.status_code, r.json()
+        except Exception:
+            return r.status_code, r.text[:300]
+    st, j = kget("/series", {"category": "Climate and Weather"})
+    ser = j.get("series", []) if isinstance(j, dict) else []
+    print(f"/series?category=Climate and Weather -> {st}, {len(ser)} series")
+    temp = [x for x in ser if any(w in (x.get("title") or "").lower() for w in ("temp", "high", "low"))]
+    for x in temp[:60]:
+        print(f"   {x.get('ticker'):14} {x.get('title')[:70]} | freq {x.get('frequency')}")
+    if ser:
+        print("   series keys:", list(ser[0].keys()))
+    st, j = kget("/series/KXHIGHNY")
+    print(f"\n/series/KXHIGHNY -> {st}: {json.dumps(j)[:1500]}")
+    st, j = kget("/markets", {"series_ticker": "KXHIGHNY", "status": "settled", "limit": 8})
+    ms = j.get("markets", []) if isinstance(j, dict) else []
+    print(f"\n/markets?series_ticker=KXHIGHNY&status=settled -> {st}, {len(ms)} markets")
+    if ms:
+        print("   market keys:", list(ms[0].keys()))
+        for m in ms[:8]:
+            print(f"   {m.get('ticker'):28} {str(m.get('subtitle') or m.get('yes_sub_title'))[:30]:30} result {m.get('result')} "
+                  f"strike {m.get('floor_strike')}-{m.get('cap_strike')} type {m.get('strike_type')} close {m.get('close_time')} vol {m.get('volume')}")
+        m = ms[0]
+        print("   rules_primary:", (m.get("rules_primary") or "")[:600])
+        print("   rules_secondary:", (m.get("rules_secondary") or "")[:400])
+        now = int(_t.time())
+        for per in (1, 60):
+            st, j = kget(f"/series/KXHIGHNY/markets/{m['ticker']}/candlesticks",
+                         {"start_ts": now - 5 * 86400, "end_ts": now, "period_interval": per})
+            c = j.get("candlesticks", []) if isinstance(j, dict) else []
+            print(f"\n   candlesticks period {per} -> {st}, {len(c)} candles; first: {json.dumps(c[:1])[:700] if c else j}")
+        st, j = kget("/markets/trades", {"ticker": m["ticker"], "limit": 3})
+        print(f"\n   /markets/trades -> {st}: {json.dumps(j)[:600]}")
+    st, j = kget("/markets", {"series_ticker": "KXHIGHNY", "status": "settled", "limit": 1000})
+    ms = j.get("markets", []) if isinstance(j, dict) else []
+    if ms:
+        print(f"\n   settled KXHIGHNY markets in one page: {len(ms)}, close times {min(m['close_time'] for m in ms)} .. {max(m['close_time'] for m in ms)}, cursor {bool(j.get('cursor'))}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
