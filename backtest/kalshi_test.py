@@ -34,7 +34,8 @@ import re
 import numpy as np
 import pandas as pd
 
-D = os.path.join("backtest_data", "kalshi")
+# data folder; KALSHI_DIR=backtest_data/kalshi_hist switches to the long history (May 2026 on)
+D = os.environ.get("KALSHI_DIR", os.path.join("backtest_data", "kalshi"))
 PM_HALF_SPREAD, PM_FEE, K_FEE = 0.01, 0.01, 0.07
 FFILL_MIN = 10            # a price is used for at most 10 minutes after it was seen
 

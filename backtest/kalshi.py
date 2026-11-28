@@ -140,7 +140,7 @@ def pm_event(args):
             continue
         if len(p) == 2 and len(t) == 2 and p[0] in ("0", "1"):
             rows.append((city, d.isoformat(), slug, m.get("groupItemTitle"), t[0], t[1], int(p[0] == "1"),
-                         m.get("startDate"), m.get("closedTime")))
+                         m.get("startDate"), m.get("closedTime"), m.get("slug")))
     return rows
 
 
@@ -186,7 +186,7 @@ def main():
     with ThreadPoolExecutor(8) as ex:
         pm = [r for x in ex.map(pm_event, jobs) for r in x]
     pm = pd.DataFrame(pm, columns=["city", "date", "event_slug", "label", "yes_token", "no_token", "won",
-                                   "market_start", "closed_time"])
+                                   "market_start", "closed_time", "market_slug"])
     pm.to_csv(os.path.join(OUT, "pm_markets.csv"), index=False)
     print(f"Polymarket: {len(pm)} brackets, {pm.event_slug.nunique()} events")
     jobs = [(t, ts(s) - 3600, (ts(c) if isinstance(c, str) else ts(s) + 4 * 86400) + 3600)
@@ -235,6 +235,62 @@ def pm_trades():
     print(f"Polymarket taker fills: {len(rows)} in {len(slugs) - failed} events ({failed} failed)")
 
 
+def history(start="2026-05-01"):
+    """Long history for the 7 same-airport cities, from `start` to yesterday (no Kalshi trades).
+    Saved to backtest_data/kalshi_hist/, minute data split by month (GitHub's 100 MB file limit)."""
+    out = os.path.join("backtest_data", "kalshi_hist")
+    os.makedirs(out, exist_ok=True)
+    cities = {c: v for c, v in PAIRS.items() if v[1]}
+    since = ts(start) - 86400
+    km = []
+    for city, (series, same) in cities.items():
+        ms = k_markets(series, since)
+        for m in ms:
+            ev = re.search(r"-(\d{2})([A-Z]{3})(\d{2})$", m["event_ticker"])
+            d = datetime.strptime(ev.group(0)[1:], "%y%b%d").date().isoformat() if ev else None
+            km.append(dict(city=city, series=series, same_airport=same, ticker=m["ticker"], date=d,
+                           strike_type=m.get("strike_type"), floor=m.get("floor_strike"), cap=m.get("cap_strike"),
+                           result=m.get("result"), open_time=m["open_time"], close_time=m["close_time"],
+                           title=m.get("yes_sub_title")))
+        dates = sorted(m["date"] for m in km if m["city"] == city and m["date"])
+        print(f"Kalshi {series}: {len(ms)} markets, days {dates[0] if dates else '-'} to {dates[-1] if dates else '-'}",
+              flush=True)
+    km = pd.DataFrame(km)
+    km = km[km.date >= start]
+    km.to_csv(os.path.join(out, "k_markets.csv"), index=False)
+    with ThreadPoolExecutor(6) as ex:
+        candles = [r for x in ex.map(k_candles, [(s, {"ticker": t, "open_time": o, "close_time": c})
+                                                 for s, t, o, c in zip(km.series, km.ticker, km.open_time, km.close_time)])
+                   for r in x]
+    kc = pd.DataFrame(candles, columns=["ticker", "t", "yes_bid", "yes_ask", "last", "volume"])
+    save_monthly(kc, "k_candles", out)
+    print(f"Kalshi: {len(kc)} minute candles", flush=True)
+    today = datetime.now(timezone.utc).date()
+    first = date.fromisoformat(start)
+    jobs = [(c, first + timedelta(days=i)) for c in cities for i in range((today - first).days)]
+    with ThreadPoolExecutor(8) as ex:
+        pm = [r for x in ex.map(pm_event, jobs) for r in x]
+    pm = pd.DataFrame(pm, columns=["city", "date", "event_slug", "label", "yes_token", "no_token", "won",
+                                   "market_start", "closed_time", "market_slug"])
+    pm.to_csv(os.path.join(out, "pm_markets.csv"), index=False)
+    for c, g in pm.groupby("city"):
+        print(f"Polymarket {c}: {g.event_slug.nunique()} events, days {g.date.min()} to {g.date.max()}", flush=True)
+    jobs = [(t, ts(s) - 3600, (ts(c) if isinstance(c, str) else ts(s) + 4 * 86400) + 3600)
+            for t, s, c in zip(pm.yes_token, pm.market_start, pm.closed_time)]
+    with ThreadPoolExecutor(8) as ex:
+        hist = [r for x in ex.map(pm_history, jobs) for r in x]
+    pp = pd.DataFrame(hist, columns=["yes_token", "t", "p"])
+    save_monthly(pp, "pm_prices", out)
+    print(f"Polymarket: {len(pp)} 1-minute prices", flush=True)
+
+
+def save_monthly(df, name, out):
+    month = pd.to_datetime(df.t, unit="s").dt.strftime("%Y-%m")
+    for mth, g in df.groupby(month):
+        g.to_parquet(os.path.join(out, f"{name}_{mth}.parquet"), index=False)
+
+
 if __name__ == "__main__":
     import sys
-    pm_trades() if len(sys.argv) > 1 and sys.argv[1] == "pmtrades" else main()
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    pm_trades() if arg == "pmtrades" else history(*sys.argv[2:]) if arg == "history" else main()

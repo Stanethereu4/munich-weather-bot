@@ -40,18 +40,40 @@ FEE = 0.01
 LOOK = 15
 
 
+def read_parts(name, key, val):
+    """Minute data as {ticker/token: Series(value, index = minute)}, read file by file to save memory.
+    Works with one parquet file (30-day data) or one per month (long history: name_YYYY-MM.parquet)."""
+    import glob
+    files = sorted(glob.glob(os.path.join(D, f"{name}_*.parquet"))) or [os.path.join(D, f"{name}.parquet")]
+    parts = {}
+    for f in files:
+        df = pd.read_parquet(f)
+        if val == "mid":
+            df["mid"] = (df.yes_bid + df.yes_ask) / 2
+        df = df[[key, "t", val]]
+        df[key] = df[key].astype("category")
+        df["t"] = df.t // 60 * 60
+        for k, g in df.groupby(key, observed=True):
+            parts.setdefault(str(k), []).append(g.groupby("t")[val].last())
+        del df
+    return {k: (v[0] if len(v) == 1 else pd.concat(v).groupby(level=0).last()) for k, v in parts.items()}
+
+
+def frame(parts, keys):
+    """Wide table: one column per ticker/token (in the given order), one row per minute."""
+    cols = {k: parts[k] for k in keys if k in parts}
+    return pd.DataFrame(cols) if cols else pd.DataFrame()
+
+
 def series(km, pm):
-    kc = pd.read_parquet(os.path.join(D, "k_candles.parquet"))
-    pp = pd.read_parquet(os.path.join(D, "pm_prices.parquet"))
-    kc["t"] = kc.t // 60 * 60; pp["t"] = pp.t // 60 * 60
-    kc["mid"] = (kc.yes_bid + kc.yes_ask) / 2
+    kc, pp = read_parts("k_candles", "ticker", "mid"), read_parts("pm_prices", "yes_token", "p")
     out = []
     for (city, date), kb in km.groupby(["city", "date"]):
         pb = pm[(pm.city == city) & (pm.date == date)]
         if pb.empty or kb.k_won.sum() != 1 or pb.won.sum() != 1:
             continue
-        K = kc[kc.ticker.isin(kb.ticker)].pivot_table(index="t", columns="ticker", values="mid", aggfunc="last")
-        P = pp[pp.yes_token.isin(pb.yes_token)].pivot_table(index="t", columns="yes_token", values="p", aggfunc="last")
+        K = frame(kc, kb.ticker.astype(str))
+        P = frame(pp, pb.yes_token.astype(str))
         if K.empty or P.empty:
             continue
         grid = np.arange(max(K.index.min(), P.index.min()), min(K.index.max(), P.index.max()) + 60, 60)
