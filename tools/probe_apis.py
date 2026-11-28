@@ -793,6 +793,37 @@ if "live" in probes:
     r = requests.get("https://aviationweather.gov/api/data/metar", params={"ids": "KDEN", "format": "json", "hours": 2}, headers=H, timeout=30)
     print(f"\nAWC live -> {r.status_code}, {len(r.json())} reports, newest receiptTime {r.json()[0].get('receiptTime') if r.json() else None}")
 
+if "pmdata" in probes:
+    # pmdata.dev: ONE real download (one Polymarket bracket, one UTC day, order book "l2"),
+    # to see the file's real structure before writing any code. Uses 1 of the 600 free downloads.
+    import io, os
+    import pyarrow.parquet as pq
+    section("pmdata.dev: one l2 file (Austin, 1 Nov 2026, a middle bracket)")
+    ev = requests.get(f"{GAMMA}/events", params={"slug": "highest-temperature-in-austin-on-november-1-2026"},
+                      headers=H, timeout=30).json()
+    mk = ev[0]["markets"]
+    print("brackets:", [(m["slug"], m.get("groupItemTitle")) for m in mk])
+    m = mk[len(mk) // 2]
+    url = f"https://api.pmdata.dev/v1/polymarket/l2/2026/11/01/{m['slug']}.parquet"
+    r = requests.get(url, headers={"api_key": os.environ.get("PMDATA_API_KEY", "")}, timeout=120)
+    print(f"GET {url}\n -> {r.status_code}, {len(r.content)} bytes, content-type {r.headers.get('content-type')}")
+    print(" response headers:", {k: v for k, v in r.headers.items() if k.lower().startswith(("x-", "ratelimit"))})
+    if r.status_code != 200:
+        print(r.text[:500])
+    else:
+        t = pq.read_table(io.BytesIO(r.content))
+        print("schema:\n", t.schema)
+        print("rows:", t.num_rows, "| metadata:", t.schema.metadata and {k[:40]: v[:200] for k, v in t.schema.metadata.items()})
+        df = t.to_pandas()
+        with pd.option_context("display.width", 250, "display.max_colwidth", 120, "display.max_columns", 30):
+            for col in df.columns:
+                print(f"  {col}: dtype {df[col].dtype}, first {str(df[col].iloc[0])[:160]}")
+            for c in df.columns:
+                if df[c].dtype == object and df[c].map(lambda x: isinstance(x, str)).all() and df[c].nunique() < 20:
+                    print(f"  values of {c}: {df[c].value_counts().to_dict()}")
+            print(df.head(3).to_string()[:2500])
+            print("...", df.tail(2).to_string()[:1500])
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)

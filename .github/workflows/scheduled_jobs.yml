@@ -187,6 +187,8 @@ jobs:
       - name: Probe external APIs (read-only)
         if: inputs.task == 'probe'
         run: python3 tools/probe_apis.py ${{ inputs.probe_args }}
+        env:
+          PMDATA_API_KEY: ${{ secrets.PMDATA_API_KEY }}       # only used by the pmdata probe
       - name: Dry run on throwaway SQLite (no DATABASE_URL -> production DB untouched)
         if: inputs.task == 'dry-run'
         run: |
