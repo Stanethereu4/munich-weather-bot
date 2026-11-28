@@ -93,15 +93,39 @@ def k_markets(series, since):
     return list({m["ticker"]: m for m in out}.values())
 
 
+def k_markets_hist(series, since):
+    """Older markets: GET /historical/markets?series_ticker=..&limit=200&cursor=.. (newest first)."""
+    out, cursor = [], None
+    for _ in range(200):
+        p = {"series_ticker": series, "limit": 200}
+        if cursor:
+            p["cursor"] = cursor
+        time.sleep(0.5)
+        j = get(f"{K}/historical/markets", p, tries=8)
+        if not j:
+            break
+        ms = j.get("markets", [])
+        out += [dict(m, hist=True) for m in ms if ts(m["close_time"]) >= since]
+        cursor = j.get("cursor")
+        if not cursor or not ms or min(ts(m["close_time"]) for m in ms) < since:
+            break
+    return out
+
+
 def k_candles(args):
     series, m = args
     start, end = ts(m["open_time"]), ts(m["close_time"])
+    # markets older than about two months moved to /historical (checked with the kalshi-hist probe,
+    # 28 Nov 2026): same candles, but prices are in "close" instead of "close_dollars"
+    url = (f"{K}/historical/markets/{m['ticker']}/candlesticks" if m.get("hist")
+           else f"{K}/series/{series}/markets/{m['ticker']}/candlesticks")
     rows = []
     for a in range(start, end, 4900 * 60):
-        j = get(f"{K}/series/{series}/markets/{m['ticker']}/candlesticks",
-                {"start_ts": a, "end_ts": min(a + 4900 * 60, end), "period_interval": 1})
+        if m.get("hist"):
+            time.sleep(0.3)                                   # the historical endpoints rate-limit quickly
+        j = get(url, {"start_ts": a, "end_ts": min(a + 4900 * 60, end), "period_interval": 1})
         for c in (j or {}).get("candlesticks", []):
-            f = lambda k: float((c.get(k) or {}).get("close_dollars") or "nan")
+            f = lambda k: float((c.get(k) or {}).get("close_dollars") or (c.get(k) or {}).get("close") or "nan")
             rows.append((m["ticker"], int(c["end_period_ts"]), f("yes_bid"), f("yes_ask"), f("price"),
                          float(c.get("volume_fp") or 0)))
     return rows
@@ -250,22 +274,25 @@ def history(start="2026-05-01", *only):
         t0 = time.time()
         # Kalshi markets and 1-minute candles
         km = []
-        for m in k_markets(series, since):
+        live = k_markets(series, since)
+        seen = {m["ticker"] for m in live}
+        for m in live + [m for m in k_markets_hist(series, since) if m["ticker"] not in seen]:
             ev = re.search(r"-(\d{2})([A-Z]{3})(\d{2})$", m["event_ticker"])
             d = datetime.strptime(ev.group(0)[1:], "%y%b%d").date().isoformat() if ev else None
             km.append(dict(city=city, series=series, same_airport=True, ticker=m["ticker"], date=d,
                            strike_type=m.get("strike_type"), floor=m.get("floor_strike"), cap=m.get("cap_strike"),
                            result=m.get("result"), open_time=m["open_time"], close_time=m["close_time"],
-                           title=m.get("yes_sub_title")))
+                           title=m.get("yes_sub_title"), hist=bool(m.get("hist"))))
         km = pd.DataFrame(km)
         km = km[km.date.notna() & (km.date >= start)]
         km.to_csv(os.path.join(out, f"k_markets_{city}.csv"), index=False)
-        with ThreadPoolExecutor(6) as ex:
-            kc = pd.DataFrame([r for x in ex.map(k_candles, [(series, {"ticker": t, "open_time": o, "close_time": c})
-                                                             for t, o, c in zip(km.ticker, km.open_time, km.close_time)])
+        with ThreadPoolExecutor(3) as ex:
+            kc = pd.DataFrame([r for x in ex.map(k_candles, [(series, {"ticker": t, "open_time": o, "close_time": c, "hist": h})
+                                                             for t, o, c, h in zip(km.ticker, km.open_time, km.close_time, km.hist)])
                                for r in x], columns=["ticker", "t", "yes_bid", "yes_ask", "last", "volume"])
         save_monthly(kc, f"k_candles_{city}", out)
-        print(f"{city}: Kalshi {len(km)} markets, days {km.date.min()} to {km.date.max()}, {len(kc)} candles", flush=True)
+        print(f"{city}: Kalshi {len(km)} markets ({int(km.hist.sum())} historical), days {km.date.min()} to "
+              f"{km.date.max()}, {len(kc)} candles, {kc.ticker.nunique()} markets with candles", flush=True)
         del kc
         # Polymarket events and 1-minute prices
         with ThreadPoolExecutor(8) as ex:
