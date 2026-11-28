@@ -288,10 +288,10 @@ def history(start="2026-05-01", *only):
         km.to_csv(os.path.join(out, f"k_markets_{city}.csv"), index=False)
         with ThreadPoolExecutor(3) as ex:
             kc = pd.DataFrame([r for x in ex.map(k_candles, [(series, {"ticker": t, "open_time": o, "close_time": c, "hist": h})
-                                                             for t, o, c, h in zip(km.ticker, km.open_time, km.close_time, km.hist)])
+                                                             for t, o, c, h in zip(km.ticker, km.open_time, km.close_time, km["hist"])])
                                for r in x], columns=["ticker", "t", "yes_bid", "yes_ask", "last", "volume"])
         save_monthly(kc, f"k_candles_{city}", out)
-        print(f"{city}: Kalshi {len(km)} markets ({int(km.hist.sum())} historical), days {km.date.min()} to "
+        print(f"{city}: Kalshi {len(km)} markets ({int(km["hist"].sum())} historical), days {km.date.min()} to "
               f"{km.date.max()}, {len(kc)} candles, {kc.ticker.nunique()} markets with candles", flush=True)
         del kc
         # Polymarket events and 1-minute prices
