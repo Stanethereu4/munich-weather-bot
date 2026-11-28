@@ -30,7 +30,6 @@ import warnings
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
 
 from backtest.kalshi_test import D, load
 
@@ -145,6 +144,7 @@ def regressions(s):
         for h in (5, 15, 30):
             for tgt, lead, own, name in ((f"fP{h}", "dK", "dP", "Polymarket follows Kalshi"),
                                          (f"fK{h}", "dP", "dK", "Kalshi follows Polymarket")):
+                import statsmodels.api as sm      # only needed here (not installed in Actions)
                 X = sm.add_constant(d[[lead, own]])
                 m = sm.OLS(d[tgt], X).fit(cov_type="cluster", cov_kwds={"groups": cl})
                 rows.append(dict(sample=subset, horizon_min=h, test=name, b_other=m.params[lead], t_other=m.tvalues[lead],
