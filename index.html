@@ -122,7 +122,7 @@ const fmt$ = x => (x < 0 ? "−$" : "$") + Math.abs(x).toFixed(Math.abs(x) >= 10
 const pct = x => (x * 100).toFixed(1) + "%";
 const cityName = c => c.split("-").map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
 let D, budget = 25, mode = "best", focus = "main", city = "", tab = "open", charts = {};
-const COLORS = {main:"#6ea8ff", move5:"#a78bfa", move15:"#f472b6", confirmed:"#f5c26b", first:"#3ecf8e", band:"#22d3ee", patient:"#fb923c"};
+const COLORS = {main:"#6ea8ff", move5:"#a78bfa", move15:"#f472b6", confirmed:"#f5c26b", first:"#3ecf8e", band:"#22d3ee", patient:"#fb923c", net:"#e5e7eb"};
 
 function fill(b) {
   if (b.maker) {
@@ -139,14 +139,25 @@ function fill(b) {
   }
   return sh > 0 ? {sh, cost, price: cost / sh} : null;
 }
-function pnl(b, f) { return b.won ? f.sh - f.cost : -f.cost; }
+// A "net" bet sold early: walk down the bids stored at the moment of the sale (taker fee applies).
+// Shares the bids could not absorb are held to the end ($1 each if the bracket won).
+function sale(b, sh) {
+  let left = sh, cash = 0;
+  for (const [p, q] of (b.xb && b.xb.length ? b.xb : [[b.xp, Infinity]])) {
+    const k = Math.min(q, left); cash += k * (p - FEE(p)); left -= k;
+    if (left <= 1e-9) break;
+  }
+  return cash + (b.won ? left : 0);
+}
+function pnl(b, f) { if (b.st === "sold") return sale(b, f.sh) - f.cost; return b.won ? f.sh - f.cost : -f.cost; }
+const done = b => b.st === "settled" || b.st === "sold";      // sold bets count as finished
 
 function stats(v) {
   const bs = D.bets.filter(b => b.v === v && (!city || b.city === city));
   const set = [], open = [];
-  for (const b of bs) { const f = fill(b); if (!f) continue; (b.st === "settled" ? set : open).push({b, f}); }
+  for (const b of bs) { const f = fill(b); if (!f) continue; (done(b) ? set : open).push({b, f}); }
   const staked = set.reduce((a, x) => a + x.f.cost, 0), profit = set.reduce((a, x) => a + pnl(x.b, x.f), 0);
-  const wins = set.filter(x => x.b.won).length;
+  const wins = set.filter(x => x.b.st === "sold" ? pnl(x.b, x.f) > 0 : x.b.won).length;
   const avgP = set.length ? set.reduce((a, x) => a + x.f.price, 0) / set.length : NaN;
   const byDay = {};
   for (const x of set) { const k = x.b.city + x.b.date; byDay[k] = (byDay[k] || 0) + pnl(x.b, x.f); }
@@ -226,8 +237,9 @@ function btable() {
   document.querySelector("#btable thead").innerHTML = head;
   if (!list.length) { document.querySelector("#btable tbody").innerHTML = `<tr><td colspan="10" class="empty">No ${tab} bets yet for this variant.</td></tr>`; return; }
   document.querySelector("#btable tbody").innerHTML = list.map(({b, f}) => {
-    const res = b.st === "settled" ? `<span class="pill ${b.won ? "won" : "lost"}">${b.won ? "won" : "lost"}</span>` : `<span class="pill open">open</span>`;
-    const p = b.st === "settled" ? pnl(b, f) : null;
+    const res = b.st === "sold" ? `<span class="pill open">sold ${(b.xp * 100).toFixed(0)}c</span>`
+      : b.st === "settled" ? `<span class="pill ${b.won ? "won" : "lost"}">${b.won ? "won" : "lost"}</span>` : `<span class="pill open">open</span>`;
+    const p = done(b) ? pnl(b, f) : null;
     return `<tr><td class="mono">${new Date(b.ts * 1000).toISOString().slice(5, 16).replace("T", " ")}</td><td>${cityName(b.city)}</td>
       <td class="mono">${b.date.slice(5)}</td><td class="mono">≥${b.x}°F ${b.dk > 0 ? "+" : ""}${(b.dk * 100).toFixed(0)}c</td>
       <td>${b.label}</td><td class="mono">${(f.price * 100).toFixed(1)}c</td><td class="mono">${f.sh.toFixed(1)}</td>
