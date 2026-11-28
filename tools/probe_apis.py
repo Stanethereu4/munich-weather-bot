@@ -825,6 +825,42 @@ if "pmdata" in probes:
             print(df.head(3).to_string()[:2500])
             print("...", df.tail(2).to_string()[:1500])
 
+if "kalshi-pages" in probes:
+    # Why does the settled-markets listing stop at late September? Show each page and any error body.
+    section("Kalshi /markets pagination, KXHIGHAUS")
+    K = "https://api.elections.kalshi.com/trade-api/v2"
+    for status in ("settled", "finalized", "closed"):
+        cursor = None
+        for page in range(8):
+            p = {"series_ticker": "KXHIGHAUS", "status": status, "limit": 200}
+            if cursor:
+                p["cursor"] = cursor
+            r = requests.get(K + "/markets", params=p, headers=H, timeout=30)
+            if r.status_code != 200:
+                print(f"{status} page {page}: {r.status_code} {r.text[:300]}"); break
+            j = r.json(); ms = j.get("markets", [])
+            cl = sorted(m["close_time"] for m in ms)
+            print(f"{status} page {page}: {len(ms)} markets, close {cl[0] if cl else '-'} .. {cl[-1] if cl else '-'}, "
+                  f"cursor {'yes' if j.get('cursor') else 'no'}")
+            cursor = j.get("cursor")
+            if not cursor or not ms:
+                break
+    for name, p in (("min/max_close_ts June", {"min_close_ts": 1780272000, "max_close_ts": 1782864000}),
+                    ("events list", None)):
+        if p is None:
+            r = requests.get(K + "/events", params={"series_ticker": "KXHIGHAUS", "limit": 200, "status": "settled"},
+                             headers=H, timeout=30)
+            j = r.json() if r.status_code == 200 else {}
+            ev = sorted(e["event_ticker"] for e in j.get("events", []))
+            print(f"{name}: {r.status_code}, {len(ev)} events, first {ev[:2]}, cursor {'yes' if j.get('cursor') else 'no'}")
+            continue
+        r = requests.get(K + "/markets", params={"series_ticker": "KXHIGHAUS", "limit": 200, **p}, headers=H, timeout=30)
+        j = r.json() if r.status_code == 200 else {}
+        print(f"{name}: {r.status_code} {'' if j else r.text[:200]} {len(j.get('markets', []))} markets "
+              f"{sorted(m['close_time'] for m in j.get('markets', []))[:1]}")
+    r = requests.get(K + "/historical/markets", params={"series_ticker": "KXHIGHAUS", "limit": 5}, headers=H, timeout=30)
+    print(f"/historical/markets: {r.status_code} {r.text[:400]}")
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
