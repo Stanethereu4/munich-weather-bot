@@ -9,6 +9,7 @@ import json
 import sys
 from datetime import date, timedelta
 
+import pandas as pd
 import requests
 
 H = {"User-Agent": "munich-weather-bot (research)"}
