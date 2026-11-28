@@ -871,11 +871,13 @@ if "kalshi-hist" in probes:
     # Older Kalshi markets live under /historical/*. Page through them and try the candle endpoints.
     section("Kalshi /historical/markets + candles, KXHIGHAUS")
     K = "https://api.elections.kalshi.com/trade-api/v2"
+    import time as _time
     cursor, allm = None, []
     for page in range(30):
         p = {"series_ticker": "KXHIGHAUS", "limit": 200}
         if cursor:
             p["cursor"] = cursor
+        _time.sleep(0.5)                                  # this endpoint rate-limits quickly (429)
         r = requests.get(K + "/historical/markets", params=p, headers=H, timeout=30)
         if r.status_code != 200:
             print(f"page {page}: {r.status_code} {r.text[:300]}"); break
@@ -892,6 +894,7 @@ if "kalshi-hist" in probes:
                                      "open_time", "close_time", "status")})
         a, b = ts_iso(m["open_time"]), ts_iso(m["close_time"])
         q = {"start_ts": a, "end_ts": min(b, a + 4900 * 60), "period_interval": 1}
+        _time.sleep(5)
         for path in (f"/historical/markets/{m['ticker']}/candlesticks",
                      f"/series/KXHIGHAUS/markets/{m['ticker']}/candlesticks"):
             r = requests.get(K + path, params=q, headers=H, timeout=30)
