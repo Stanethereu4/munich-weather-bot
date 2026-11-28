@@ -861,6 +861,47 @@ if "kalshi-pages" in probes:
     r = requests.get(K + "/historical/markets", params={"series_ticker": "KXHIGHAUS", "limit": 5}, headers=H, timeout=30)
     print(f"/historical/markets: {r.status_code} {r.text[:400]}")
 
+
+def ts_iso(x):
+    from datetime import datetime as _dt
+    return int(_dt.fromisoformat(x.replace("Z", "+00:00")).timestamp())
+
+
+if "kalshi-hist" in probes:
+    # Older Kalshi markets live under /historical/*. Page through them and try the candle endpoints.
+    section("Kalshi /historical/markets + candles, KXHIGHAUS")
+    K = "https://api.elections.kalshi.com/trade-api/v2"
+    cursor, allm = None, []
+    for page in range(30):
+        p = {"series_ticker": "KXHIGHAUS", "limit": 200}
+        if cursor:
+            p["cursor"] = cursor
+        r = requests.get(K + "/historical/markets", params=p, headers=H, timeout=30)
+        if r.status_code != 200:
+            print(f"page {page}: {r.status_code} {r.text[:300]}"); break
+        j = r.json(); ms = j.get("markets", []); allm += ms
+        cursor = j.get("cursor")
+        if not cursor or not ms:
+            break
+    cl = sorted(m["close_time"] for m in allm)
+    print(f"{len(allm)} historical markets, close {cl[0] if cl else '-'} .. {cl[-1] if cl else '-'}, pages {page + 1}")
+    if allm:
+        m = min(allm, key=lambda m: abs(ts_iso(m["close_time"]) - 1781600000))   # one around mid June
+        print("keys:", list(m.keys()))
+        print({k: m.get(k) for k in ("ticker", "event_ticker", "strike_type", "floor_strike", "cap_strike", "result",
+                                     "open_time", "close_time", "status")})
+        a, b = ts_iso(m["open_time"]), ts_iso(m["close_time"])
+        q = {"start_ts": a, "end_ts": min(b, a + 4900 * 60), "period_interval": 1}
+        for path in (f"/historical/markets/{m['ticker']}/candlesticks",
+                     f"/series/KXHIGHAUS/markets/{m['ticker']}/candlesticks"):
+            r = requests.get(K + path, params=q, headers=H, timeout=30)
+            try:
+                c = r.json().get("candlesticks", [])
+                print(f"{path}: {r.status_code}, {len(c)} candles; first {json.dumps(c[0])[:400] if c else r.text[:200]}")
+            except Exception:
+                print(f"{path}: {r.status_code} {r.text[:200]}")
+
+
 if "gamma-rules" in probes:
     d = date.today() - timedelta(days=3)
     ev = gamma_event(d)
