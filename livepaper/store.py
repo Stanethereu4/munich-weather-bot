@@ -6,6 +6,8 @@ SQLite locally). Two new tables, created if missing; nothing else is touched.
 
 lp_bets       one row per (signal, variant): the moment, the signal, the bracket, and the
               full Polymarket ask ladder at that moment (so any bet size can be replayed later)
+              "net" bets that were sold early also get exit_ts, exit_price (best bid) and exit_bids
+              (the bid ladder at that moment, best first) and status 'sold'
 lp_heartbeat  one row every few minutes: is the loop alive, how many cities/thresholds it saw
 """
 import json
@@ -29,6 +31,16 @@ def init():
         ladder TEXT, floor_f INTEGER, kalshi_trades INTEGER, maker INTEGER, maker_price REAL,
         maker_status TEXT, maker_fill_ts BIGINT, maker_traded_shares REAL, status TEXT, won INTEGER,
         settled_utc TEXT)""")
+    conn.commit()
+    # columns added on 28 Nov 2026 for the "net" variant (selling early); harmless if they exist
+    for col, typ in (("exit_ts", "BIGINT"), ("exit_price", "REAL"), ("exit_bids", "TEXT")):
+        if db.DATABASE_URL:
+            cur.execute(f"ALTER TABLE lp_bets ADD COLUMN IF NOT EXISTS {col} {typ}")
+        else:
+            try:
+                cur.execute(f"ALTER TABLE lp_bets ADD COLUMN {col} {typ}")
+            except Exception:
+                pass                                   # SQLite: column already there
     cur.execute(f"""CREATE TABLE IF NOT EXISTS lp_heartbeat (
         id {pk}, ts BIGINT, created_utc TEXT, cities_ok INTEGER, thresholds INTEGER, note TEXT)""")
     conn.commit(); conn.close()

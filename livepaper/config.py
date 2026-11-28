@@ -43,4 +43,7 @@ VARIANTS = {
     "band":       dict(thr=0.10, price_band=(0.10, 0.50), skip_dead=True,
                        label="Kalshi >= 10c, bracket 10-50c and not ruled out by the readings"),
     "patient":    dict(thr=0.10, maker=True, label="Kalshi >= 10c, resting bid instead of paying the ask"),
+    # added 28 Nov 2026: a signal the other way SELLS the open bets of that city-day at the best bid
+    # instead of buying the opposite bracket (backtest: backtest/leadlag_net.py)
+    "net":        dict(thr=0.10, net=True, label="Kalshi >= 10c, an opposite signal sells instead of buying the other side"),
 }

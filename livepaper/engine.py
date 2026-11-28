@@ -116,6 +116,9 @@ class Engine:
         if v.get("first_per_city_day") and (name, city, date) in self.first_done:
             return
         direction = 1 if dK > 0 else -1
+        if v.get("net") and self.close_opposite(name, t, city, date, direction, books):
+            self.last_bet[key] = t                         # a sale counts as this threshold's action
+            return
         target = [b for b in pb if (b["lo"] == X + 1 if direction > 0 else b["hi"] == X - 2)]
         if len(target) != 1:
             return
@@ -153,6 +156,21 @@ class Engine:
         print(f"[bet] {name:9} {city} {date} X={X} Kalshi {dK*100:+.0f}c Polymarket {dP*100:+.1f}c -> "
               f"{b['label']} ask {bk['ask']:.3f} ({bk['asks'][0][1]:.0f} shares)")
 
+    def close_opposite(self, name, t, city, date, direction, books):
+        """"net" variant: sell the open bets of this city-day that point the other way, at the best bid.
+        Returns True if there were any (then no new bet is placed, even if a book had no bid)."""
+        opp = store.query("SELECT id, yes_token, bracket_label FROM lp_bets WHERE variant = ? AND city = ? "
+                          "AND target_date = ? AND direction = ? AND status = 'open'", (name, city, date, -direction))
+        for r in opp:
+            bk = books.get(r["yes_token"])
+            if not bk or bk["bid"] is None:
+                print(f"[sell]  {name:9} {city} {date} {r['bracket_label']}: no bid, keep holding")
+                continue
+            store.update("UPDATE lp_bets SET status = 'sold', exit_ts = ?, exit_price = ?, exit_bids = ? WHERE id = ?",
+                         (t, bk["bid"], json.dumps(bk["bids"][:LADDER_LEVELS]), r["id"]))
+            print(f"[sell]  {name:9} {city} {date} {r['bracket_label']} at bid {bk['bid']:.3f}")
+        return bool(opp)
+
     # ------------------------------------------------------- housekeeping --
     def maker_fills(self):
         t = int(time.time())
@@ -166,7 +184,9 @@ class Engine:
                 store.update("UPDATE lp_bets SET maker_status = 'unfilled' WHERE id = ?", (r["id"],))
 
     def settle(self):
-        open_ = store.query("SELECT DISTINCT city, target_date FROM lp_bets WHERE status = 'open'")
+        # 'sold' bets ("net" variant) also get their result, for shares the bids could not absorb
+        open_ = store.query("SELECT DISTINCT city, target_date FROM lp_bets "
+                            "WHERE status = 'open' OR (status = 'sold' AND won IS NULL)")
         for r in open_:
             tz = ZoneInfo(CITIES[r["city"]][2])
             if datetime.now(tz).date().isoformat() <= r["target_date"]:
@@ -184,6 +204,8 @@ class Engine:
                     continue
                 store.update("UPDATE lp_bets SET status = 'settled', won = ?, settled_utc = ? "
                              "WHERE status = 'open' AND yes_token = ?", (won, now_iso(), b["yes"]))
+                store.update("UPDATE lp_bets SET won = ?, settled_utc = ? "
+                             "WHERE status = 'sold' AND won IS NULL AND yes_token = ?", (won, now_iso(), b["yes"]))
             print(f"[settle] {r['city']} {r['target_date']}")
 
 

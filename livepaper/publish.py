@@ -46,7 +46,9 @@ def build():
                    dir=b["direction"], dk=round(b["k_move"], 4), dp=round(b["p_move"], 4), label=b["bracket_label"],
                    bid=b["best_bid"], ask=b["best_ask"], lad=trim(json.loads(b["ladder"] or "[]")),
                    maker=b["maker"], mp=b["maker_price"], ms=b["maker_status"], msh=b["maker_traded_shares"],
-                   floor=b["floor_f"], kt=b["kalshi_trades"], st=b["status"], won=b["won"]) for b in bets])
+                   floor=b["floor_f"], kt=b["kalshi_trades"], st=b["status"], won=b["won"],
+                   xt=b.get("exit_ts"), xp=b.get("exit_price"),
+                   xb=[[round(p, 4), round(q, 2)] for p, q in json.loads(b.get("exit_bids") or "[]")]) for b in bets])
     os.makedirs(SITE, exist_ok=True)
     with open(os.path.join(SITE, "data.json"), "w") as fh:
         json.dump(data, fh, separators=(",", ":"))
