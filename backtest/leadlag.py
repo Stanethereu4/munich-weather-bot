@@ -64,8 +64,9 @@ def frame(parts, keys):
     return pd.DataFrame(cols) if cols else pd.DataFrame()
 
 
-def series(km, pm):
-    kc, pp = read_parts("k_candles", "ticker", "mid"), read_parts("pm_prices", "yes_token", "p")
+def series(km, pm, kc=None, pp=None):
+    if kc is None:
+        kc, pp = read_parts("k_candles", "ticker", "mid"), read_parts("pm_prices", "yes_token", "p")
     out = []
     for (city, date), kb in km.groupby(["city", "date"]):
         pb = pm[(pm.city == city) & (pm.date == date)]
@@ -115,6 +116,20 @@ def series(km, pm):
                     df[f"{name}_notok"] = None
             out.append(df)
     return pd.concat(out)
+
+
+def signals_chunked(km, pm, min_move=0.05):
+    """series + features city by city and month by month, keeping only minutes where Kalshi moved
+    >= min_move (the full minute-by-minute table of 7 months does not fit in memory)."""
+    kc, pp = read_parts("k_candles", "ticker", "mid"), read_parts("pm_prices", "yes_token", "p")
+    out = []
+    for (city, month), kb in km.groupby([km.city, km.date.str[:7]]):
+        s = series(kb, pm, kc, pp)
+        if len(s):
+            f = features(s)
+            out.append(f[f.dK.abs() >= min_move])
+        print(f"   {city} {month}: {kb.date.nunique()} days, {sum(len(x) for x in out)} signal-minutes so far", flush=True)
+    return pd.concat(out, ignore_index=True)
 
 
 def features(s):

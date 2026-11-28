@@ -19,7 +19,7 @@ os.environ.setdefault("KALSHI_DIR", os.path.join("backtest_data", "kalshi_hist")
 import pandas as pd  # noqa: E402
 
 from backtest.kalshi_test import D, load  # noqa: E402
-from backtest.leadlag import features, series  # noqa: E402
+from backtest.leadlag import signals_chunked  # noqa: E402
 from backtest.leadlag_real import dedupe  # noqa: E402
 
 FREE_DOWNLOADS = 600
@@ -29,10 +29,10 @@ FREE_LAG_DAYS = 21
 def main():
     km, pm = load()
     km = km[km.same_airport]                       # the 7 cities with the same airport on both platforms
-    s = features(series(km, pm))
+    s = signals_chunked(km, pm)
     slug = dict(zip(pm.yes_token.astype(str), pm.market_slug))
     cutoff = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=FREE_LAG_DAYS)).strftime("%Y-%m-%d")
-    print(f"city-days with both platforms: {s.groupby(['city', 'date']).ngroups}, "
+    print(f"city-days with a Kalshi move >= 5c: {s.groupby(['city', 'date']).ngroups}, "
           f"from {s.date.min()} to {s.date.max()}; free-plan cutoff (UTC day) {cutoff}\n")
 
     rows = []
