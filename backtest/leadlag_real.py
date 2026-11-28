@@ -34,7 +34,10 @@ FEE, ENTRY_WIN, TP = 0.01, 600, 0.04
 
 
 def dedupe(sig):
-    sig = sig.sort_values("t"); keep, last = [], {}
+    # reset the index first: the minute table is built by concatenating many small tables, so its
+    # index labels repeat, and .loc[labels] would bring back rows that should have been dropped
+    # (bug found 28 Nov 2026: it inflated the 30-day bet counts)
+    sig = sig.reset_index(drop=True).sort_values("t"); keep, last = [], {}
     for r in sig.itertuples():
         k = (r.city, r.date, r.X)
         if k in last and r.t - last[k] < 1800:
