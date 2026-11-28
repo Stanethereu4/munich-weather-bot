@@ -317,6 +317,28 @@ def history(start="2026-05-01", *only):
         pd.concat(parts).to_csv(os.path.join(out, f"{name}.csv"), index=False)
 
 
+def history_trades(*only):
+    """Polymarket taker fills for the long history, city by city (pm_trades_<city>_<YYYY-MM>.parquet)."""
+    out = os.path.join("backtest_data", "kalshi_hist")
+    cities = [c for c, v in PAIRS.items() if v[1] and (not only or c in only)]
+    for city in cities:
+        t0 = time.time()
+        pm = pd.read_csv(os.path.join(out, f"pm_markets_{city}.csv"))
+        slugs = sorted(pm.event_slug.unique())
+        with ThreadPoolExecutor(6) as ex:
+            res = list(ex.map(pm_trades_event, slugs))
+        failed = [s for s, r in zip(slugs, res) if r is None]
+        df = pd.DataFrame([x for r in res if r for x in r],
+                          columns=["event_slug", "token_id", "side", "size", "price", "timestamp", "wallet"])
+        df = df.rename(columns={"timestamp": "t"})
+        for c in ("event_slug", "token_id", "side", "wallet"):
+            df[c] = df[c].astype("category")
+        save_monthly(df, f"pm_trades_{city}", out)
+        n = df.groupby(df.event_slug.str.extract(r"on-([a-z]+)-", expand=False), observed=True).size()
+        print(f"{city}: {len(df)} taker fills in {len(slugs) - len(failed)} events ({len(failed)} failed; "
+              f"{failed[:3]}), per month {n.to_dict()} ({time.time() - t0:.0f}s)", flush=True)
+
+
 def save_monthly(df, name, out):
     month = pd.to_datetime(df.t, unit="s").dt.strftime("%Y-%m")
     for mth, g in df.groupby(month):
@@ -326,4 +348,5 @@ def save_monthly(df, name, out):
 if __name__ == "__main__":
     import sys
     arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    pm_trades() if arg == "pmtrades" else history(*sys.argv[2:]) if arg == "history" else main()
+    (pm_trades() if arg == "pmtrades" else history(*sys.argv[2:]) if arg == "history"
+     else history_trades(*sys.argv[2:]) if arg == "histtrades" else main())
